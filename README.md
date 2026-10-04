@@ -4,6 +4,8 @@ A browser re-creation of Larry Yaeger's **Polyworld** (1994), an artificial-life
 simulation in which agents evolve brains, see with rendered vision, and learn
 during their lifetimes. WebGL2 and plain ES modules, no build step.
 
+**Live:** https://joyhughes.github.io/polyworld/
+
 ```sh
 python3 serve.py   # then open http://localhost:8000 (no-cache, so edits show on reload)
 ```
