@@ -1,0 +1,394 @@
+// Agents, food, barriers and the per-step simulation.
+
+import { P, WORLDS } from './params.js';
+import { makeRng } from './rng.js';
+import { GENE, decode, randomGenome, mutate, crossover } from './genome.js';
+import { Brain, OUT } from './brain.js';
+
+const DEG = Math.PI / 180;
+const CELL = 5;
+
+let nextId = 1;
+
+export class Agent {
+  constructor(genome, x, z, yaw, energy, rng, generation = 0) {
+    this.id = nextId++;
+    this.genome = genome;
+    const d = (this.traits = decode(genome));
+    this.brain = new Brain(genome, d, rng);
+    this.x = x;
+    this.z = z;
+    this.yaw = yaw;
+    this.size = d.size;
+    this.r = 0.6 * d.size;
+    this.len = 1.2 * d.size;
+    this.wid = 0.8 * d.size;
+    this.hgt = 0.6 + 0.3 * d.size;
+    this.maxEnergy = P.maxEnergyPerSize * d.size;
+    this.energy = Math.min(energy, this.maxEnergy);
+    this.generation = generation;
+    this.age = 0;
+    this.eaten = 0;
+    this.offspring = 0;
+    this.kills = 0;
+    this.mateWait = P.mateWait;
+    this.attackedAt = -1;
+    this.speed = 0;
+    this.fov = 60 * DEG;
+    this.out = new Float32Array(7).fill(0.5);
+    this.dead = null;
+  }
+
+  // Load the retina row and internal state into the input neurons, then step.
+  think(pixels, row, rw, rng) {
+    const b = this.brain, s = b.state, base = row * rw * 4;
+    s[0] = rng();
+    s[1] = this.energy / this.maxEnergy;
+    for (let c = 0; c < 3; c++) {
+      const start = b.starts[2 + c], n = b.sizes[2 + c];
+      for (let k = 0; k < n; k++) {
+        const x0 = Math.floor((k * rw) / n), x1 = Math.floor(((k + 1) * rw) / n);
+        let sum = 0;
+        for (let x = x0; x < x1; x++) sum += pixels[base + x * 4 + c];
+        s[start + k] = sum / ((x1 - x0) * 255);
+      }
+    }
+    b.step();
+    for (let o = 0; o < 7; o++) this.out[o] = b.output(o);
+  }
+
+  act(world) {
+    const o = this.out, t = this.traits, c = P.cost;
+    const turn = (o[OUT.yaw] - 0.5) * 2;
+    this.yaw += turn * P.maxTurn;
+    this.speed = o[OUT.speed] * t.maxSpeed;
+    this.fov = (P.fovMin + (P.fovMax - P.fovMin) * o[OUT.focus]) * DEG;
+
+    const nx = this.x + Math.cos(this.yaw) * this.speed;
+    const nz = this.z + Math.sin(this.yaw) * this.speed;
+    if (!world.blocked(nx, nz, this.r)) {
+      this.x = nx;
+      this.z = nz;
+    } else if (!world.blocked(nx, this.z, this.r)) {
+      this.x = nx;
+    } else if (!world.blocked(this.x, nz, this.r)) {
+      this.z = nz;
+    }
+
+    const b = this.brain;
+    let cost = c.base * this.size
+      + c.neuron * b.numNeurons
+      + c.synapse * b.numSynapses
+      + world.moveCost * this.speed * this.size
+      + c.turn * Math.abs(turn)
+      + c.eat * o[OUT.eat]
+      + c.mate * o[OUT.mate]
+      + c.light * o[OUT.light];
+    if (o[OUT.fight] > P.fightThreshold) cost += c.fight * o[OUT.fight] * t.strength;
+    this.energy -= cost;
+    this.age++;
+    if (this.mateWait > 0) this.mateWait--;
+  }
+
+  fitness() {
+    const f = P.fit;
+    return f.eat * this.eaten / this.maxEnergy
+      + f.mate * this.offspring
+      + f.age * this.age / this.traits.lifespan
+      + f.energy * Math.max(0, this.energy) / this.maxEnergy;
+  }
+
+  color() {
+    return [this.out[OUT.fight], this.traits.green, this.out[OUT.mate]];
+  }
+}
+
+export class World {
+  constructor(layout = 'patches', seed = (Math.random() * 2 ** 32) >>> 0, size = P.worldSize) {
+    this.seed = seed;
+    this.rng = makeRng(seed);
+    this.layoutKey = layout;
+    const L = WORLDS[layout];
+    // Layouts are drawn on a 100x100 world; larger worlds scale coordinates
+    // linearly and populations, food rates and caps by area.
+    this.size = size;
+    const k = size / 100, area = k * k;
+    this.minAgents = Math.round(P.minAgents * area);
+    this.maxAgents = Math.round(P.maxAgents * area);
+    this.maxFood = Math.round(P.food.maxTotal * area);
+    this.corpseEnergy = L.corpseEnergy ?? P.corpseEnergy;
+    this.moveCost = P.cost.move * (L.moveCostScale ?? 1);
+    this.patches = L.patches.map((p) => ({
+      rect: p.rect.map((v) => v * k), rate: p.rate * area, max: Math.round(p.max * area), count: 0, acc: 0,
+    }));
+    this.barriers = L.barriers.map((b) => {
+      const [x0, z0, x1, z1] = b.map((v) => v * k);
+      return { x0, z0, x1, z1, thick: 0.6, height: 2.5 };
+    });
+    this.agents = [];
+    this.food = [];
+    this.elites = [];
+    this.t = 0;
+    this.stats = { born: 0, ga: 0, starved: 0, old: 0, killed: 0, plant: 0, meat: 0 };
+    this.interval = { born: 0, ga: 0, deaths: 0 };
+    this.history = [];
+    this.historyEvery = 50;
+
+    this.ncell = Math.ceil(this.size / CELL);
+    this.agentCells = Array.from({ length: this.ncell * this.ncell }, () => []);
+    this.foodCells = Array.from({ length: this.ncell * this.ncell }, () => []);
+
+    for (const p of this.patches) {
+      while (p.count < p.max / 2) this.spawnFood(p);
+    }
+    for (let i = 0; i < Math.round(P.initAgents * area); i++) this.agents.push(this.makeGAAgent(true));
+  }
+
+  // --- geometry -----------------------------------------------------------
+
+  blocked(x, z, r) {
+    if (x < r || z < r || x > this.size - r || z > this.size - r) return true;
+    for (const b of this.barriers) {
+      const dx = b.x1 - b.x0, dz = b.z1 - b.z0;
+      const L2 = dx * dx + dz * dz;
+      let u = L2 ? ((x - b.x0) * dx + (z - b.z0) * dz) / L2 : 0;
+      u = u < 0 ? 0 : u > 1 ? 1 : u;
+      const ex = b.x0 + u * dx - x, ez = b.z0 + u * dz - z;
+      const lim = r + b.thick / 2;
+      if (ex * ex + ez * ez < lim * lim) return true;
+    }
+    return false;
+  }
+
+  randomFreeSpot(r, rect) {
+    const [x0, z0, x1, z1] = rect || [0, 0, this.size, this.size];
+    for (let i = 0; i < 50; i++) {
+      const x = x0 + this.rng() * (x1 - x0), z = z0 + this.rng() * (z1 - z0);
+      if (!this.blocked(x, z, r)) return [x, z];
+    }
+    return [this.size / 2, this.size / 2];
+  }
+
+  // --- food ---------------------------------------------------------------
+
+  spawnFood(patch) {
+    const pi = this.patches.indexOf(patch);
+    const [x, z] = this.randomFreeSpot(0.6, patch.rect);
+    const f = P.food;
+    this.food.push({ x, z, energy: f.minEnergy + this.rng() * (f.maxEnergy - f.minEnergy), patch: pi });
+    patch.count++;
+  }
+
+  static foodHalf(f) {
+    return 0.25 + 0.45 * Math.sqrt(Math.min(1, f.energy / P.food.maxEnergy));
+  }
+
+  // --- agents -------------------------------------------------------------
+
+  makeGAAgent(initial = false) {
+    const rng = this.rng;
+    let genome, gen = 0;
+    if (!initial && this.elites.length >= 2 && rng() >= P.randomFraction) {
+      const a = this.elites[rng.int(this.elites.length)];
+      let b = this.elites[rng.int(this.elites.length)];
+      if (b === a) b = this.elites[(this.elites.indexOf(a) + 1) % this.elites.length];
+      const pts = decode(a.genome).crossoverPoints;
+      genome = crossover(a.genome, b.genome, pts, rng);
+      mutate(genome, decode(genome).mutationRate, rng);
+      gen = Math.max(a.generation, b.generation) + 1;
+    } else {
+      genome = randomGenome(rng);
+    }
+    const size = P.size[0] + (P.size[1] - P.size[0]) * genome[GENE.size];
+    const [x, z] = this.randomFreeSpot(0.6 * size);
+    const energy = P.maxEnergyPerSize * size * P.initEnergyFrac;
+    return new Agent(genome, x, z, rng() * Math.PI * 2, energy, rng, gen);
+  }
+
+  recordElite(a) {
+    const fit = a.fitness();
+    const E = this.elites;
+    if (E.length >= P.elites && fit <= E[E.length - 1].fitness) return;
+    E.push({ fitness: fit, genome: a.genome, generation: a.generation, id: a.id });
+    E.sort((p, q) => q.fitness - p.fitness);
+    if (E.length > P.elites) E.length = P.elites;
+  }
+
+  mate(a, b, births) {
+    const ea = a.energy * a.traits.mateEnergy, eb = b.energy * b.traits.mateEnergy;
+    if (ea + eb < P.minOffspringEnergy) return;
+    const rng = this.rng;
+    const pts = rng() < 0.5 ? a.traits.crossoverPoints : b.traits.crossoverPoints;
+    const genome = crossover(a.genome, b.genome, pts, rng);
+    mutate(genome, (a.traits.mutationRate + b.traits.mutationRate) / 2, rng);
+    let x = (a.x + b.x) / 2, z = (a.z + b.z) / 2;
+    if (this.blocked(x, z, 0.6)) { x = a.x; z = a.z; }
+    a.energy -= ea;
+    b.energy -= eb;
+    a.mateWait = b.mateWait = P.mateWait;
+    a.offspring++;
+    b.offspring++;
+    const child = new Agent(genome, x, z, rng() * Math.PI * 2, ea + eb, rng,
+      Math.max(a.generation, b.generation) + 1);
+    child.parents = [a.id, b.id];
+    births.push(child);
+  }
+
+  buildGrid() {
+    const n = this.ncell, inv = 1 / CELL;
+    for (const c of this.agentCells) c.length = 0;
+    for (const c of this.foodCells) c.length = 0;
+    const cellOf = (x, z) => {
+      const cx = Math.min(n - 1, Math.max(0, Math.floor(x * inv)));
+      const cz = Math.min(n - 1, Math.max(0, Math.floor(z * inv)));
+      return cz * n + cx;
+    };
+    for (const a of this.agents) this.agentCells[cellOf(a.x, a.z)].push(a);
+    for (const f of this.food) this.foodCells[cellOf(f.x, f.z)].push(f);
+  }
+
+  interact(births) {
+    const n = this.ncell, inv = 1 / CELL;
+    for (const a of this.agents) {
+      const cx = Math.floor(a.x * inv), cz = Math.floor(a.z * inv);
+      const eat = a.out[OUT.eat], fight = a.out[OUT.fight], mate = a.out[OUT.mate];
+      for (let j = cz - 1; j <= cz + 1; j++) {
+        if (j < 0 || j >= n) continue;
+        for (let i = cx - 1; i <= cx + 1; i++) {
+          if (i < 0 || i >= n) continue;
+          const cell = j * n + i;
+
+          if (eat > P.eatThreshold) {
+            for (const f of this.foodCells[cell]) {
+              if (f.energy <= 0) continue;
+              const lim = a.r + World.foodHalf(f);
+              const dx = f.x - a.x, dz = f.z - a.z;
+              if (dx * dx + dz * dz > lim * lim) continue;
+              const amt = Math.min(f.energy, P.eatRate * eat, a.maxEnergy - a.energy);
+              if (amt <= 0) continue;
+              f.energy -= amt;
+              a.energy += amt;
+              a.eaten += amt;
+              if (f.patch < 0) this.stats.meat += amt; else this.stats.plant += amt;
+            }
+          }
+
+          for (const b of this.agentCells[cell]) {
+            if (b === a) continue;
+            const dx = b.x - a.x, dz = b.z - a.z;
+            const lim = a.r + b.r, d2 = dx * dx + dz * dz;
+            if (d2 > lim * lim) continue;
+
+            if (a.id < b.id) {
+              // soft separation so bodies don't pile up
+              const d = Math.sqrt(d2) || 1e-3, push = (lim - d) * 0.25;
+              const px = (dx / d) * push, pz = (dz / d) * push;
+              if (!this.blocked(a.x - px, a.z - pz, a.r)) { a.x -= px; a.z -= pz; }
+              if (!this.blocked(b.x + px, b.z + pz, b.r)) { b.x += px; b.z += pz; }
+
+              if (mate > P.mateThreshold && b.out[OUT.mate] > P.mateThreshold
+                && a.mateWait === 0 && b.mateWait === 0
+                && this.agents.length + births.length < this.maxAgents) {
+                this.mate(a, b, births);
+              }
+            }
+
+            if (fight > P.fightThreshold && b.energy > 0) {
+              b.energy -= P.fightDamage * fight * a.traits.strength * a.size;
+              b.attackedAt = this.t;
+              if (b.energy <= 0) a.kills++;
+            }
+          }
+        }
+      }
+    }
+  }
+
+  // One simulation step. `pixels` holds one retina row per agent, in agent order.
+  update(pixels, rw) {
+    const A = this.agents, rng = this.rng;
+    for (let i = 0; i < A.length; i++) A[i].think(pixels, i, rw, rng);
+    for (const a of A) a.act(this);
+
+    this.buildGrid();
+    const births = [];
+    this.interact(births);
+
+    // deaths
+    const alive = [];
+    for (const a of A) {
+      let cause = null;
+      if (a.energy <= 0) cause = a.attackedAt >= this.t - 1 ? 'killed' : 'starved';
+      else if (a.age >= a.traits.lifespan) cause = 'old';
+      if (!cause) { alive.push(a); continue; }
+      a.dead = cause;
+      this.stats[cause]++;
+      this.interval.deaths++;
+      this.recordElite(a);
+      if (this.food.length < this.maxFood) {
+        this.food.push({ x: a.x, z: a.z, energy: this.corpseEnergy * a.size, patch: -1 });
+      }
+    }
+    for (const c of births) alive.push(c);
+    this.stats.born += births.length;
+    this.interval.born += births.length;
+    this.agents = alive;
+
+    // eaten food
+    let w = 0;
+    for (const f of this.food) {
+      if (f.energy > 0.5) this.food[w++] = f;
+      else if (f.patch >= 0) this.patches[f.patch].count--;
+    }
+    this.food.length = w;
+
+    // food growth
+    for (const p of this.patches) {
+      p.acc += p.rate;
+      while (p.acc >= 1) {
+        p.acc -= 1;
+        if (p.count < p.max && this.food.length < this.maxFood) this.spawnFood(p);
+      }
+    }
+
+    // steady-state GA keeps the population from collapsing
+    while (this.agents.length < this.minAgents) {
+      this.agents.push(this.makeGAAgent());
+      this.stats.ga++;
+      this.interval.ga++;
+    }
+
+    this.t++;
+    if (this.t % this.historyEvery === 0) this.sample();
+  }
+
+  sample() {
+    const A = this.agents;
+    let neurons = 0, syn = 0, gen = 0, fit = 0;
+    for (const a of A) {
+      neurons += a.brain.numNeurons;
+      syn += a.brain.numSynapses;
+      gen += a.generation;
+      fit += a.fitness();
+    }
+    const n = A.length || 1;
+    this.history.push({
+      t: this.t,
+      pop: A.length,
+      food: this.food.length,
+      born: this.interval.born,
+      ga: this.interval.ga,
+      deaths: this.interval.deaths,
+      neurons: neurons / n,
+      synapses: syn / n,
+      generation: gen / n,
+      fitness: fit / n,
+    });
+    this.interval = { born: 0, ga: 0, deaths: 0 };
+    if (this.history.length > 800) {
+      // halve resolution, keep the whole run
+      this.history = this.history.filter((_, i) => i % 2 === 1);
+      this.historyEvery *= 2;
+    }
+  }
+}
