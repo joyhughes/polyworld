@@ -43,6 +43,14 @@
   .muted { color: var(--dim); }
   #agentInfo { display: grid; grid-template-columns: 1fr 1fr; gap: 1px 12px; }
   #agentInfo span { color: var(--dim); }
+  #brainView { position: absolute; right: 12px; bottom: 34px; width: min(720px, calc(100% - 24px)); height: min(480px, calc(100% - 60px));
+    min-width: 360px; min-height: 260px; resize: both; overflow: hidden; display: flex; flex-direction: column;
+    background: rgba(13,14,18,0.94); border: 1px solid var(--line); border-radius: 6px; box-shadow: 0 8px 30px #0008; }
+  #brainView[hidden] { display: none; }
+  .bv-head { display: flex; align-items: center; gap: 6px; padding: 5px 8px; border-bottom: 1px solid var(--line); cursor: move; user-select: none; }
+  .bv-title { flex: 1; color: var(--dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .bv-head button { padding: 2px 7px; }
+  #brainView canvas { flex: 1; width: 100%; min-height: 0; display: block; }
   @media (max-width: 760px) {
     #app { flex-direction: column; }
     #view { height: 55vh; flex: none; }
@@ -55,7 +63,20 @@
   <div id="view">
     <canvas id="gl"></canvas>
     <div id="hud"></div>
-    <div id="help">drag: orbit · right/shift-drag: pan · wheel: zoom · click: select · space: pause · F: follow · E: agent's eye · N: fittest</div>
+    <div id="help">drag: orbit · right/shift-drag: pan · wheel: zoom · click: select · space: pause · F: follow · E: agent's eye · N: fittest · B: brain</div>
+    <div id="brainView" hidden>
+      <div class="bv-head">
+        <span class="bv-title">Brain</span>
+        <button data-tab="network">Network</button>
+        <button data-tab="activity">Activity</button>
+        <button data-tab="matrix">Matrix</button>
+        <span style="width:6px"></span>
+        <button data-mode="signal" title="Edge brightness = weight × presynaptic activity">signal</button>
+        <button data-mode="weights" title="Edge brightness = synapse weight">weights</button>
+        <button class="bv-close" title="Close (B)">×</button>
+      </div>
+      <canvas></canvas>
+    </div>
   </div>
   <aside id="side">
     <h2>Simulation</h2>
@@ -117,7 +138,9 @@
       <canvas id="pov" class="panel" width="32" height="1" style="height:22px"></canvas>
       <canvas id="povN" class="panel" width="8" height="3" style="height:30px;margin-top:2px"></canvas>
       <div class="bars" id="outputs" style="margin-top:8px"></div>
-      <div style="margin-top:8px" class="muted">brain: activations (left column) and synapse weights, target rows × source columns; red excitatory, blue inhibitory</div>
+      <div class="row" style="margin-top:8px"><button id="openBrain">Brain view (B)</button>
+        <span class="muted">network diagram, activity over time, weights</span></div>
+      <div style="margin-top:4px" class="muted">brain: activations (left column) and synapse weights, target rows × source columns; red excitatory, blue inhibitory</div>
       <canvas id="brain" class="panel" width="340" height="340"></canvas>
     </div>
   </aside>

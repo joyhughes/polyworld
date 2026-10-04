@@ -1,11 +1,13 @@
 import { P, WORLDS } from './params.js';
 import { World } from './world.js';
 import { Renderer } from './gl.js';
+import { BrainView, drawMatrix } from './brainview.js';
 import { OUTPUT_NAMES } from './genome.js';
 
 const $ = (id) => document.getElementById(id);
 
 const renderer = new Renderer($('gl'));
+const brainView = new BrainView($('brainView'));
 let world;
 let paused = false;
 let stepsPerFrame = 10;
@@ -34,6 +36,7 @@ function stepOnce() {
   renderer.renderVision(world);
   visionOrder = world.agents.slice();
   world.update(renderer.pixels, renderer.rw);
+  brainView.record(selected());
 }
 
 // --- controls -----------------------------------------------------------
@@ -68,6 +71,18 @@ $('camOrbit').onclick = () => setCam('orbit');
 $('camFollow').onclick = () => setCam('follow');
 $('camEye').onclick = () => setCam('eye');
 
+function openBrain(on = true) {
+  if (on && !selected()) selectFittest();
+  brainView.toggle(on);
+}
+$('openBrain').onclick = () => openBrain(true);
+
+function retinaOf(a) {
+  const row = a ? visionOrder.indexOf(a) : -1, rw = renderer.rw;
+  if (row < 0 || row >= renderer.rows) return null;
+  return renderer.pixels.subarray(row * rw * 4, (row + 1) * rw * 4);
+}
+
 function selectFittest() {
   let best = null;
   for (const a of world.agents) if (!best || a.fitness() > best.fitness()) best = a;
@@ -80,6 +95,7 @@ window.addEventListener('keydown', (e) => {
   else if (e.key === 'f' || e.key === 'F') setCam(cam.mode === 'follow' ? 'orbit' : 'follow');
   else if (e.key === 'e' || e.key === 'E') setCam(cam.mode === 'eye' ? 'orbit' : 'eye');
   else if (e.key === 'n' || e.key === 'N') selectFittest();
+  else if (e.key === 'b' || e.key === 'B') openBrain(!brainView.open);
   else if (e.key === 'Escape') { selectedId = null; setCam('orbit'); }
 });
 
@@ -283,47 +299,7 @@ function drawBrain(b) {
   const c = $('brain');
   fitCanvas(c);
   c.height = c.width;
-  const N = b.numNeurons, ctx = c.getContext('2d');
-  const cols = N + 2, cell = c.width / cols;
-  ctx.fillStyle = '#0d0e12';
-  ctx.fillRect(0, 0, c.width, c.height);
-  // weight matrix
-  const W = new Float32Array(N * N);
-  for (let s = 0; s < b.numSynapses; s++) W[b.to[s] * N + b.from[s]] += b.w[s];
-  const img = ctx.createImageData(cols, N);
-  const d = img.data;
-  for (let r = 0; r < N; r++) {
-    const act = Math.round(b.state[r] * 255);
-    const o = r * cols * 4;
-    d[o] = d[o + 1] = d[o + 2] = act; d[o + 3] = 255;
-    d[o + 7] = 0;
-    for (let k = 0; k < N; k++) {
-      const v = W[r * N + k] / P.maxWeight, p = o + (k + 2) * 4;
-      if (v > 0) { d[p] = 60 + 195 * v; d[p + 1] = 70 * v; d[p + 2] = 30 * v; }
-      else if (v < 0) { d[p] = 30 * -v; d[p + 1] = 90 * -v; d[p + 2] = 60 + 195 * -v; }
-      d[p + 3] = v ? 255 : 0;
-    }
-  }
-  const off = new OffscreenCanvas(cols, N);
-  off.getContext('2d').putImageData(img, 0, 0);
-  ctx.imageSmoothingEnabled = false;
-  ctx.drawImage(off, 0, 0, cols * cell, N * cell);
-  // group boundaries
-  ctx.strokeStyle = '#ffffff22';
-  ctx.lineWidth = 1;
-  ctx.fillStyle = '#8a90a0';
-  ctx.font = '9px ui-monospace, monospace';
-  for (let g = 0; g < b.sizes.length; g++) {
-    if (!b.sizes[g]) continue;
-    const p = Math.round(b.starts[g] * cell) + 0.5;
-    ctx.beginPath();
-    ctx.moveTo(2 * cell + p, 0); ctx.lineTo(2 * cell + p, N * cell);
-    ctx.moveTo(0, p); ctx.lineTo(c.width, p);
-    ctx.stroke();
-  }
-  if (N * cell < c.height - 12) {
-    ctx.fillText(`${N} neurons · ${b.numSynapses} synapses · inputs | internal | outputs`, 2, N * cell + 11);
-  }
+  drawMatrix(c, b);
 }
 
 // --- main loop ------------------------------------------------------------
@@ -337,7 +313,7 @@ function loop() {
       if (performance.now() - t0 > 40) break;
     }
   }
-  if (selectedId != null && !selected() && cam.mode !== 'orbit') {
+  if (selectedId != null && !selected() && (cam.mode !== 'orbit' || brainView.open)) {
     // the agent we were riding along with died: hand the camera to the fittest survivor
     selectFittest();
     if (!selected()) setCam('orbit');
@@ -348,6 +324,7 @@ function loop() {
     + (s ? ` · following #${s.id}` : '') + (paused ? ' · <b>paused</b>' : '');
   if (frame % 6 === 0) { drawStats(); drawCharts(); }
   if (frame % 2 === 0) { drawWall(); drawAgent(); }
+  brainView.draw(s, retinaOf(s));
   frame++;
   requestAnimationFrame(loop);
 }
@@ -364,6 +341,7 @@ requestAnimationFrame(loop);
 window.pw = {
   get world() { return world; },
   renderer,
+  brainView,
   run(n) { for (let i = 0; i < n; i++) stepOnce(); return world.t; },
   pause: setPaused,
 };

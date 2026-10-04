@@ -73,7 +73,14 @@ brain updates and the GPU vision pass split the time about evenly.
 
 Drag to orbit, right-drag or shift-drag to pan, scroll to zoom. Click an agent
 to inspect it. **Space** pauses, **N** selects the fittest agent alive, **F**
-follows it, and **E** shows the world through its eyes. The inspector shows the
+follows it, **E** shows the world through its eyes, and **B** opens the brain
+viewer. The brain viewer is a draggable, resizable window with three tabs.
+*Network* is a live wiring diagram: retina, energy and random inputs on the
+left, internal groups in the middle (squares are inhibitory), outputs and their
+thresholds on the right. Neurons glow with activation, and edges show either
+weight × presynaptic activity (*signal*) or raw weights. Hover a neuron to
+isolate its connections. *Activity* is a raster of every neuron over the last
+400 steps. *Matrix* is the full weight matrix. The inspector shows the
 agent's retina, vision neurons, outputs and its full synapse weight matrix.
 
 `node tools/smoke.mjs [layout] [steps]` runs the simulation headless, with noise
@@ -87,6 +94,7 @@ in place of vision, to check that the code runs and how fast.
 src/params.js   parameters and world layouts
 src/genome.js   genome layout, decoding, mutation, crossover
 src/brain.js    brain growth from genes, update and Hebbian learning
+src/brainview.js  brain viewer: network diagram, activity raster, weight matrix
 src/world.js    agents, food, barriers, interactions, GA, statistics
 src/gl.js       instanced-box renderer, per-agent vision pass, picking
 src/main.js     UI, camera, charts, inspector
