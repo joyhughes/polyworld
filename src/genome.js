@@ -11,7 +11,8 @@ export const MAX_EXC = 8;
 export const MAX_INH = 8;
 
 export const INPUT_NAMES = ['random', 'energy', 'red', 'green', 'blue'];
-export const OUTPUT_NAMES = ['eat', 'mate', 'fight', 'speed', 'yaw', 'light', 'focus'];
+// pitch exists only in 3D worlds; it is last so the others keep their indices
+export const OUTPUT_NAMES = ['eat', 'mate', 'fight', 'speed', 'yaw', 'light', 'focus', 'pitch'];
 export const N_IN = INPUT_NAMES.length;
 export const N_OUT = OUTPUT_NAMES.length;
 export const N_SRC = N_IN + MAX_INTERNAL + N_OUT; // groups that send synapses
@@ -31,6 +32,7 @@ gene('green');
 gene('redN');
 gene('greenN');
 gene('blueN');
+gene('visionRows'); // 3D only: retina rows each colour channel is split into
 gene('numInternal');
 gene('exc', MAX_INTERNAL);
 gene('inh', MAX_INTERNAL);
@@ -64,6 +66,7 @@ export function decode(g) {
     nRed: irange(1, MAX_VISION, g[G.redN]),
     nGreen: irange(1, MAX_VISION, g[G.greenN]),
     nBlue: irange(1, MAX_VISION, g[G.blueN]),
+    visionRows: irange(1, 4, g[G.visionRows]),
     numInternal: irange(1, MAX_INTERNAL, g[G.numInternal]),
     exc,
     inh,

@@ -1,27 +1,40 @@
 // WebGL2 renderer. Every object in the world is an instanced box. Each step
-// every agent's point of view is rendered into its own 1-pixel-tall row of an
-// offscreen framebuffer (retinaWidth x numAgents), read back once, and fed to
-// the brains — the same per-agent POV rendering Polyworld uses for vision.
+// every agent's point of view is rendered into its own block of an offscreen
+// framebuffer (retinaWidth x retinaHeight: one row on the flat world, several
+// in a 3D volume), read back once, and fed to the brains — the per-agent POV
+// rendering Polyworld uses for vision.
 
 import { P } from './params.js';
 import { World } from './world.js';
 import { OUT } from './brain.js';
 
+// Object record, shared by the instance buffer and the vision object texture:
+// (x, z, yaw, front) (sx, sy, sz, r) (g, b, centreY, pitch)
+const REC = 12;
+
+// Place a unit box (x,z in [-.5,.5], y in [0,1]) by scale, pitch, yaw and centre.
+const PLACE = `
+vec3 rot(vec3 p, float yaw, float pitch) {
+  float cp = cos(pitch), sp = sin(pitch);
+  p = vec3(p.x * cp - p.y * sp, p.x * sp + p.y * cp, p.z);
+  float c = cos(yaw), s = sin(yaw);
+  return vec3(p.x * c - p.z * s, p.y, p.x * s + p.z * c);
+}`;
+
 const VS = `#version 300 es
 layout(location=0) in vec3 aPos;
 layout(location=1) in vec3 aNrm;
 layout(location=2) in vec4 iA;   // x, z, yaw, front-face brightness
-layout(location=3) in vec3 iS;   // scale
-layout(location=4) in vec3 iC;   // colour
+layout(location=3) in vec4 iS;   // scale xyz, red
+layout(location=4) in vec4 iC;   // green, blue, centre y, pitch
 uniform mat4 uVP;
 out vec3 vC;
 out vec3 vN;
+${PLACE}
 void main() {
-  float c = cos(iA.z), s = sin(iA.z);
-  vec3 p = aPos * iS;
-  vec3 w = vec3(p.x * c - p.z * s, p.y, p.x * s + p.z * c) + vec3(iA.x, 0.0, iA.y);
-  vN = vec3(aNrm.x * c - aNrm.z * s, aNrm.y, aNrm.x * s + aNrm.z * c);
-  vC = iC * (aNrm.x > 0.5 ? iA.w : 1.0);
+  vec3 w = rot((aPos - vec3(0.0, 0.5, 0.0)) * iS.xyz, iA.z, iC.w) + vec3(iA.x, iC.z, iA.y);
+  vN = rot(aNrm, iA.z, iC.w);
+  vC = vec3(iS.w, iC.x, iC.y) * (aNrm.x > 0.5 ? iA.w : 1.0);
   gl_Position = uVP * vec4(w, 1.0);
 }`;
 
@@ -40,64 +53,68 @@ void main() {
 // Vision pass. One instanced draw renders a range of objects for every agent in
 // a grid cell: instance i is object (start + i % len) seen by agent
 // (agentStart + i / len). Objects come from a texture (3 RGBA32F texels each),
-// agent eyes from another (2 texels each). Each agent's projection is squeezed
-// into its own framebuffer row, and fragments landing in other rows are dropped.
+// agent eyes from another (3 texels each). Each agent's projection is squeezed
+// into its own retina block of the framebuffer; fragments outside it are dropped.
 const VISION_VS = `#version 300 es
 precision highp float;
 precision highp int;
 layout(location=0) in vec3 aPos;
 layout(location=1) in vec3 aNrm;
-uniform highp sampler2D uObj;   // (x, z, yaw, front) (sx, sy, sz, r) (g, b, -, -)
-uniform highp sampler2D uEye;   // (ex, ez, cos, sin) (tan(hfov/2), row, -, -)
+uniform highp sampler2D uObj;   // object records
+uniform highp sampler2D uEye;   // (ex, ey, ez, block x) (fwd xyz, tan(hfov/2)) (up xyz, block y)
 uniform int uStart, uLen, uAgentStart;
-uniform float uRows, uEyeY, uTanV, uFar, uA, uB;
-flat out int vRow;
+uniform vec2 uFb;               // framebuffer size in pixels
+uniform vec2 uRet;              // retina block size in pixels
+uniform float uVAspect, uFar, uA, uB;
+flat out ivec2 vBlock;
 out vec3 vC;
 ivec2 tc(int i) { return ivec2(i & 4095, i >> 12); }
+${PLACE}
 void main() {
   int obj = uStart + gl_InstanceID % uLen;
   int ag = uAgentStart + gl_InstanceID / uLen;
   vec4 o0 = texelFetch(uObj, tc(obj * 3), 0);
   vec4 o1 = texelFetch(uObj, tc(obj * 3 + 1), 0);
   vec4 o2 = texelFetch(uObj, tc(obj * 3 + 2), 0);
-  vec4 e0 = texelFetch(uEye, tc(ag * 2), 0);
-  vec4 e1 = texelFetch(uEye, tc(ag * 2 + 1), 0);
-  vRow = int(e1.y);
+  vec4 e0 = texelFetch(uEye, tc(ag * 3), 0);
+  vec4 e1 = texelFetch(uEye, tc(ag * 3 + 1), 0);
+  vec4 e2 = texelFetch(uEye, tc(ag * 3 + 2), 0);
+  vec3 eye = e0.xyz, F = e1.xyz, U = e2.xyz, R = cross(F, U);
+  float tanH = e1.w, tanV = tanH * uVAspect;
+  vBlock = ivec2(e0.w, e2.w);
   vC = vec3(o1.w, o2.x, o2.y) * (aNrm.x > 0.5 ? o0.w : 1.0);
 
-  // cheap per-object cull: behind the eye, beyond range, or well outside the fov
-  vec2 dc = o0.xy - e0.xy;
-  float fc = dc.x * e0.z + dc.y * e0.w;
-  float rc = -dc.x * e0.w + dc.y * e0.z;
-  float rad = 0.5 * length(o1.xz);
-  if (fc < -rad || fc > uFar + rad || abs(rc) > fc * e1.x + rad + 0.5) {
+  // cheap per-object cull: behind the eye, beyond range, or well outside the frustum
+  vec3 dc = vec3(o0.x, o2.z, o0.y) - eye;
+  float rad = 0.5 * length(o1.xyz);
+  float fc = dot(dc, F);
+  if (fc < -rad || fc > uFar + rad || abs(dot(dc, R)) > fc * tanH + rad + 0.5
+      || abs(dot(dc, U)) > fc * tanV + rad + 0.5) {
     gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
     return;
   }
 
-  float c = cos(o0.z), s = sin(o0.z);
-  vec3 p = aPos * o1.xyz;
-  vec3 w = vec3(p.x * c - p.z * s, p.y, p.x * s + p.z * c) + vec3(o0.x, 0.0, o0.y);
-  vec3 d = w - vec3(e0.x, uEyeY, e0.y);
-  float fwd = d.x * e0.z + d.z * e0.w;
-  float right = -d.x * e0.w + d.z * e0.z;
-  vec4 clip = vec4(right / e1.x, d.y / uTanV, -uA * fwd + uB, fwd);
-  float row = e1.y;
-  clip.y = clip.w * (-1.0 + (2.0 * row + 1.0) / uRows) + clip.y / uRows;
+  vec3 w = rot((aPos - vec3(0.0, 0.5, 0.0)) * o1.xyz, o0.z, o2.w) + vec3(o0.x, o2.z, o0.y);
+  vec3 d = w - eye;
+  float fwd = dot(d, F);
+  vec4 clip = vec4(dot(d, R) / tanH, dot(d, U) / tanV, -uA * fwd + uB, fwd);
+  // squeeze the [-1,1] frustum into this agent's block
+  vec2 org = vec2(vBlock);
+  clip.xy = clip.w * (-1.0 + (2.0 * org + uRet) / uFb) + clip.xy * uRet / uFb;
   gl_Position = clip;
 }`;
 
 const VISION_FS = `#version 300 es
 precision mediump float;
-flat in int vRow;
+flat in ivec2 vBlock;
 in vec3 vC;
+uniform highp vec2 uRet;
 out vec4 o;
 void main() {
-  if (int(gl_FragCoord.y) != vRow) discard;
+  ivec2 p = ivec2(gl_FragCoord.xy) - vBlock;
+  if (p.x < 0 || p.y < 0 || p.x >= int(uRet.x) || p.y >= int(uRet.y)) discard;
   o = vec4(vC, 1.0);
 }`;
-
-const STRIDE = 10; // floats per instance
 
 function cube() {
   // unit box: x,z in [-.5,.5], y in [0,1]; 6 faces x 2 triangles
@@ -129,14 +146,14 @@ export function perspective(out, fovy, aspect, near, far) {
   return out;
 }
 
-export function lookAt(out, ex, ey, ez, cx, cy, cz) {
+export function lookAt(out, ex, ey, ez, cx, cy, cz, upx = 0, upy = 1, upz = 0) {
   let fx = cx - ex, fy = cy - ey, fz = cz - ez;
   let l = Math.hypot(fx, fy, fz);
   fx /= l; fy /= l; fz /= l;
-  // s = f x up(0,1,0)
-  let sx = -fz, sy = 0, sz = fx;
-  l = Math.hypot(sx, sz) || 1;
-  sx /= l; sz /= l;
+  // s = f x up
+  let sx = fy * upz - fz * upy, sy = fz * upx - fx * upz, sz = fx * upy - fy * upx;
+  l = Math.hypot(sx, sy, sz) || 1;
+  sx /= l; sy /= l; sz /= l;
   // u = s x f
   const ux = sy * fz - sz * fy, uy = sz * fx - sx * fz, uz = sx * fy - sy * fx;
   out[0] = sx; out[1] = ux; out[2] = -fx; out[3] = 0;
@@ -158,9 +175,45 @@ export function mul(out, a, b) {
   return out;
 }
 
+// Eye position, forward and up vectors (no roll) for an agent.
 export function agentEye(a) {
-  const c = Math.cos(a.yaw), s = Math.sin(a.yaw), h = a.len / 2 + 0.02;
-  return [a.x + c * h, P.eyeHeight, a.z + s * h, c, s];
+  const cy = Math.cos(a.yaw), sy = Math.sin(a.yaw), cp = Math.cos(a.pitch), sp = Math.sin(a.pitch);
+  const f = [cy * cp, sp, sy * cp];
+  const u = [-cy * sp, cp, -sy * sp];
+  const h = a.len / 2 + 0.02;
+  return { e: [a.x + f[0] * h, a.y + f[1] * h, a.z + f[2] * h], f, u };
+}
+
+// Write one object record at slot `i` of `d`.
+function rec(d, i, x, z, yaw, front, sx, sy, sz, r, g, b, cy, pitch) {
+  const o = i * REC;
+  d[o] = x; d[o + 1] = z; d[o + 2] = yaw; d[o + 3] = front;
+  d[o + 4] = sx; d[o + 5] = sy; d[o + 6] = sz; d[o + 7] = r;
+  d[o + 8] = g; d[o + 9] = b; d[o + 10] = cy; d[o + 11] = pitch;
+}
+
+function agentRec(d, i, a, dims) {
+  const [r, g, b] = a.color();
+  rec(d, i, a.x, a.z, a.yaw, 0.25 + 0.75 * a.out[OUT.light], a.len, a.hgt, a.wid, r, g, b,
+    dims === 3 ? a.y : a.hgt / 2, a.pitch);
+}
+
+function foodRec(d, i, f, dims) {
+  const h = World.foodHalf(f) * 2;
+  if (dims === 3) rec(d, i, f.x, f.z, 0, 1, h, h, h, 0.15, 0.85, 0.15, f.y, 0);
+  else rec(d, i, f.x, f.z, 0, 1, h, 0.6, h, 0.15, 0.85, 0.15, 0.3, 0);
+}
+
+function barrierRec(d, i, b, world) {
+  const dx = b.x1 - b.x0, dz = b.z1 - b.z0;
+  const h = world.dims === 3 ? world.height : b.height;
+  rec(d, i, (b.x0 + b.x1) / 2, (b.z0 + b.z1) / 2, Math.atan2(dz, dx), 1,
+    Math.hypot(dx, dz) + b.thick, h, b.thick, 0.55, 0.55, 0.6, h / 2, 0);
+}
+
+function groundRec(d, i, world) {
+  const S = world.size;
+  rec(d, i, S / 2, S / 2, 0, 1, S, 0.02, S, 0.11, 0.11, 0.13, 0.01, 0);
 }
 
 export class Renderer {
@@ -188,7 +241,7 @@ export class Renderer {
     const prog = (this.prog = link(VS, FS));
     const vp = (this.vprog = link(VISION_VS, VISION_FS));
     this.vu = {};
-    for (const n of ['uObj', 'uEye', 'uStart', 'uLen', 'uAgentStart', 'uRows', 'uEyeY', 'uTanV', 'uFar', 'uA', 'uB']) {
+    for (const n of ['uObj', 'uEye', 'uStart', 'uLen', 'uAgentStart', 'uFb', 'uRet', 'uVAspect', 'uFar', 'uA', 'uB']) {
       this.vu[n] = gl.getUniformLocation(vp, n);
     }
     this.uVP = gl.getUniformLocation(prog, 'uVP');
@@ -206,14 +259,11 @@ export class Renderer {
 
     this.ib = gl.createBuffer();
     gl.bindBuffer(gl.ARRAY_BUFFER, this.ib);
-    const attr = (loc, n, off) => {
-      gl.enableVertexAttribArray(loc);
-      gl.vertexAttribPointer(loc, n, gl.FLOAT, false, STRIDE * 4, off * 4);
-      gl.vertexAttribDivisor(loc, 1);
-    };
-    attr(2, 4, 0);
-    attr(3, 3, 4);
-    attr(4, 3, 7);
+    for (let k = 0; k < 3; k++) {
+      gl.enableVertexAttribArray(2 + k);
+      gl.vertexAttribPointer(2 + k, 4, gl.FLOAT, false, REC * 4, k * 16);
+      gl.vertexAttribDivisor(2 + k, 1);
+    }
     gl.bindVertexArray(null);
 
     // cube-only VAO for the vision pass (no instanced attributes)
@@ -230,21 +280,34 @@ export class Renderer {
     this.objData = new Float32Array(0);
     this.eyeData = new Float32Array(0);
 
-    this.inst = new Float32Array(STRIDE * 2048);
+    this.inst = new Float32Array(REC * 2048);
     this.proj = new Float32Array(16);
     this.view = new Float32Array(16);
     this.vp = new Float32Array(16);
 
+    this.maxTex = gl.getParameter(gl.MAX_TEXTURE_SIZE);
     this.rw = P.retinaWidth;
-    this.allocVision(P.maxAgents + 16);
-    this.maxRows = gl.getParameter(gl.MAX_TEXTURE_SIZE);
+    this.rh = 1;
+    this.fbW = this.fbH = 0;
+    this.pixels = new Uint8Array(0); // compact retinas: agent i at i * rw * rh * 4
     gl.enable(gl.DEPTH_TEST);
     gl.enable(gl.CULL_FACE);
   }
 
-  allocVision(rows) {
-    const gl = this.gl;
-    this.rows = rows;
+  // Size the vision framebuffer for n agents with rw x rh retinas. Blocks stack
+  // vertically, spilling into extra columns past the texture height limit.
+  allocVision(n, rh) {
+    const gl = this.gl, rw = this.rw;
+    const perCol = Math.floor(this.maxTex / rh);
+    const cap = Math.ceil(n * 1.25) + 16;
+    const cols = Math.ceil(cap / perCol);
+    const W = rw * cols, H = Math.min(cap, perCol) * rh;
+    this.rh = rh;
+    this.perCol = perCol;
+    this.cap = cols * perCol;
+    if (W === this.fbW && H === this.fbH) return;
+    this.fbW = W;
+    this.fbH = H;
     if (this.fbo) {
       gl.deleteFramebuffer(this.fbo);
       gl.deleteTexture(this.tex);
@@ -252,60 +315,61 @@ export class Renderer {
     }
     this.tex = gl.createTexture();
     gl.bindTexture(gl.TEXTURE_2D, this.tex);
-    gl.texStorage2D(gl.TEXTURE_2D, 1, gl.RGBA8, this.rw, rows);
+    gl.texStorage2D(gl.TEXTURE_2D, 1, gl.RGBA8, W, H);
     this.depth = gl.createRenderbuffer();
     gl.bindRenderbuffer(gl.RENDERBUFFER, this.depth);
-    gl.renderbufferStorage(gl.RENDERBUFFER, gl.DEPTH_COMPONENT16, this.rw, rows);
+    gl.renderbufferStorage(gl.RENDERBUFFER, gl.DEPTH_COMPONENT16, W, H);
     this.fbo = gl.createFramebuffer();
     gl.bindFramebuffer(gl.FRAMEBUFFER, this.fbo);
     gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, this.tex, 0);
     gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT, gl.RENDERBUFFER, this.depth);
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
-    this.pixels = new Uint8Array(this.rw * rows * 4);
+    this.raw = new Uint8Array(W * H * 4);
   }
 
-  // Fill the instance buffer. Objects agents can see come first (visionCount);
-  // ground, patch markers and the selection marker follow.
+  // Fill the instance buffer for the main view.
   writeInstances(world, selected) {
-    const need = (world.agents.length + world.food.length + world.barriers.length + world.patches.length + 4) * STRIDE;
+    const dims = world.dims;
+    const shadows = dims === 3 ? world.agents.length + world.food.length : 0;
+    const need = (world.agents.length + world.food.length + world.barriers.length + world.patches.length
+      + shadows + 24) * REC;
     if (need > this.inst.length) this.inst = new Float32Array(need * 2);
     const d = this.inst;
     let n = 0;
-    const put = (x, z, yaw, front, sx, sy, sz, r, g, b) => {
-      const o = n * STRIDE;
-      d[o] = x; d[o + 1] = z; d[o + 2] = yaw; d[o + 3] = front;
-      d[o + 4] = sx; d[o + 5] = sy; d[o + 6] = sz;
-      d[o + 7] = r; d[o + 8] = g; d[o + 9] = b;
-      n++;
-    };
-    for (const a of world.agents) {
-      const [r, g, b] = a.color();
-      put(a.x, a.z, a.yaw, 0.25 + 0.75 * a.out[OUT.light], a.len, a.hgt, a.wid, r, g, b);
-    }
-    for (const f of world.food) {
-      const h = World.foodHalf(f) * 2;
-      put(f.x, f.z, 0, 1, h, 0.6, h, 0.15, 0.85, 0.15);
-    }
-    for (const b of world.barriers) {
-      const dx = b.x1 - b.x0, dz = b.z1 - b.z0;
-      put((b.x0 + b.x1) / 2, (b.z0 + b.z1) / 2, Math.atan2(dz, dx), 1,
-        Math.hypot(dx, dz) + b.thick, b.height, b.thick, 0.55, 0.55, 0.6);
-    }
-    const visionCount = n;
+    for (const a of world.agents) agentRec(d, n++, a, dims);
+    for (const f of world.food) foodRec(d, n++, f, dims);
+    for (const b of world.barriers) barrierRec(d, n++, b, world);
+    groundRec(d, n++, world);
     const S = world.size;
-    put(S / 2, S / 2, 0, 1, S, 0.02, S, 0.11, 0.11, 0.13);
     for (const p of world.patches) {
       const [x0, z0, x1, z1] = p.rect;
       if (x1 - x0 >= S && z1 - z0 >= S) continue;
-      put((x0 + x1) / 2, (z0 + z1) / 2, 0, 1, x1 - x0, 0.03, z1 - z0, 0.12, 0.17, 0.12);
+      rec(d, n++, (x0 + x1) / 2, (z0 + z1) / 2, 0, 1, x1 - x0, 0.03, z1 - z0, 0.12, 0.17, 0.12, 0.015, 0);
+    }
+    if (dims === 3) {
+      // shadows on the floor give depth cues; a wire frame marks the volume
+      for (const a of world.agents) rec(d, n++, a.x, a.z, a.yaw, 1, a.len, 0.01, a.wid, 0.04, 0.04, 0.05, 0.04, 0);
+      for (const f of world.food) {
+        const h = World.foodHalf(f) * 2;
+        rec(d, n++, f.x, f.z, 0, 1, h, 0.01, h, 0.05, 0.09, 0.05, 0.035, 0);
+      }
+      const H = world.height, t = 0.15, e = [0.22, 0.24, 0.3];
+      for (const [x, z] of [[0, 0], [S, 0], [0, S], [S, S]]) rec(d, n++, x, z, 0, 1, t, H, t, ...e, H / 2, 0);
+      for (const y of [H]) {
+        rec(d, n++, S / 2, 0, 0, 1, S, t, t, ...e, y, 0);
+        rec(d, n++, S / 2, S, 0, 1, S, t, t, ...e, y, 0);
+        rec(d, n++, 0, S / 2, 0, 1, t, t, S, ...e, y, 0);
+        rec(d, n++, S, S / 2, 0, 1, t, t, S, ...e, y, 0);
+      }
     }
     if (selected) {
-      put(selected.x, selected.z, selected.yaw, 1, 0.25, 3.2, 0.25, 1, 1, 1);
+      const base = dims === 3 ? selected.y + selected.hgt / 2 : 0;
+      rec(d, n++, selected.x, selected.z, selected.yaw, 1, 0.25, 3.2, 0.25, 1, 1, 1, base + 1.6, 0);
     }
     const gl = this.gl;
     gl.bindBuffer(gl.ARRAY_BUFFER, this.ib);
-    gl.bufferData(gl.ARRAY_BUFFER, d.subarray(0, n * STRIDE), gl.DYNAMIC_DRAW);
-    return { count: n, visionCount };
+    gl.bufferData(gl.ARRAY_BUFFER, d.subarray(0, n * REC), gl.DYNAMIC_DRAW);
+    return n;
   }
 
   makeDataTex() {
@@ -331,10 +395,10 @@ export class Renderer {
 
   renderVision(world) {
     const gl = this.gl, A = world.agents, F = world.food, B = world.barriers;
-    const nA = A.length;
+    const nA = A.length, dims = world.dims;
     if (!nA) return;
-    if (nA > this.rows) this.allocVision(Math.min(this.maxRows, Math.ceil(nA * 1.25)));
-    const rows = this.rows;
+    const rh = dims === 3 ? P.retinaHeight3D : 1, rw = this.rw;
+    if (rh !== this.rh || nA > this.cap || !this.fbo) this.allocVision(nA, rh);
 
     // bucket agents and food into vision cells (counting sort, row-major)
     const cell = P.visionRange, nc = Math.max(1, Math.ceil(world.size / cell)), ncells = nc * nc;
@@ -346,40 +410,31 @@ export class Renderer {
     for (let i = 0; i < F.length; i++) { const c = cellOf(F[i].x, F[i].z); fCell[i] = c; objCount[c + 1]++; }
     for (let c = 0; c < ncells; c++) { objCount[c + 1] += objCount[c]; agCount[c + 1] += agCount[c]; }
     const objStart = objCount.slice(), agStart = agCount.slice(); // prefix sums
-    const nObj = nA + F.length + B.length;
+    const nGlobal = B.length + (dims === 3 ? 1 : 0);   // seen from everywhere
+    const nObj = nA + F.length + nGlobal;
 
-    if (this.objData.length < nObj * 12 + 4096 * 4) this.objData = new Float32Array(nObj * 24 + 4096 * 4);
-    if (this.eyeData.length < nA * 8 + 4096 * 4) this.eyeData = new Float32Array(nA * 16 + 4096 * 4);
+    if (this.objData.length < nObj * REC + 4096 * 4) this.objData = new Float32Array(nObj * REC * 2 + 4096 * 4);
+    if (this.eyeData.length < nA * 12 + 4096 * 4) this.eyeData = new Float32Array(nA * 24 + 4096 * 4);
     const od = this.objData, ed = this.eyeData;
-    const put = (slot, x, z, yaw, front, sx, sy, sz, r, g, b) => {
-      const o = slot * 12;
-      od[o] = x; od[o + 1] = z; od[o + 2] = yaw; od[o + 3] = front;
-      od[o + 4] = sx; od[o + 5] = sy; od[o + 6] = sz; od[o + 7] = r;
-      od[o + 8] = g; od[o + 9] = b;
-    };
     const fill = objCount; // reuse as running insertion cursor
     for (let i = 0; i < nA; i++) {
-      const a = A[i], [r, g, b] = a.color();
-      put(fill[aCell[i]]++, a.x, a.z, a.yaw, 0.25 + 0.75 * a.out[OUT.light], a.len, a.hgt, a.wid, r, g, b);
-      const e = agCount[aCell[i]]++ * 8, [ex, , ez, c, s] = agentEye(a);
-      ed[e] = ex; ed[e + 1] = ez; ed[e + 2] = c; ed[e + 3] = s;
-      ed[e + 4] = Math.tan(a.fov / 2); ed[e + 5] = i;
+      const a = A[i];
+      agentRec(od, fill[aCell[i]]++, a, dims);
+      const o = agCount[aCell[i]]++ * 12, { e, f, u } = agentEye(a);
+      const bx = Math.floor(i / this.perCol) * rw, by = (i % this.perCol) * rh;
+      ed[o] = e[0]; ed[o + 1] = e[1]; ed[o + 2] = e[2]; ed[o + 3] = bx;
+      ed[o + 4] = f[0]; ed[o + 5] = f[1]; ed[o + 6] = f[2]; ed[o + 7] = Math.tan(a.fov / 2);
+      ed[o + 8] = u[0]; ed[o + 9] = u[1]; ed[o + 10] = u[2]; ed[o + 11] = by;
     }
-    for (let i = 0; i < F.length; i++) {
-      const f = F[i], h = World.foodHalf(f) * 2;
-      put(fill[fCell[i]]++, f.x, f.z, 0, 1, h, 0.6, h, 0.15, 0.85, 0.15);
-    }
-    const barrierStart = nA + F.length;
-    B.forEach((b, i) => {
-      const dx = b.x1 - b.x0, dz = b.z1 - b.z0;
-      put(barrierStart + i, (b.x0 + b.x1) / 2, (b.z0 + b.z1) / 2, Math.atan2(dz, dx), 1,
-        Math.hypot(dx, dz) + b.thick, b.height, b.thick, 0.55, 0.55, 0.6);
-    });
+    for (let i = 0; i < F.length; i++) foodRec(od, fill[fCell[i]]++, F[i], dims);
+    const globalStart = nA + F.length;
+    B.forEach((b, i) => barrierRec(od, globalStart + i, b, world));
+    if (dims === 3) groundRec(od, globalStart + B.length, world);
     this.uploadData(this.objTex, od, nObj * 3, 0);
-    this.uploadData(this.eyeTex, ed, nA * 2, 1);
+    this.uploadData(this.eyeTex, ed, nA * 3, 1);
 
     gl.bindFramebuffer(gl.FRAMEBUFFER, this.fbo);
-    gl.viewport(0, 0, this.rw, rows);
+    gl.viewport(0, 0, this.fbW, this.fbH);
     gl.clearColor(0, 0, 0, 1);
     gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
     gl.useProgram(this.vprog);
@@ -387,9 +442,9 @@ export class Renderer {
     const u = this.vu, far = P.visionRange, near = P.near;
     gl.uniform1i(u.uObj, 0);
     gl.uniform1i(u.uEye, 1);
-    gl.uniform1f(u.uRows, rows);
-    gl.uniform1f(u.uEyeY, P.eyeHeight);
-    gl.uniform1f(u.uTanV, Math.tan(20 * Math.PI / 180));
+    gl.uniform2f(u.uFb, this.fbW, this.fbH);
+    gl.uniform2f(u.uRet, rw, rh);
+    gl.uniform1f(u.uVAspect, P.retinaVAspect);
     gl.uniform1f(u.uFar, far);
     gl.uniform1f(u.uA, (far + near) / (near - far));
     gl.uniform1f(u.uB, (2 * far * near) / (near - far));
@@ -409,12 +464,30 @@ export class Renderer {
           const s0 = objStart[j * nc + i0], s1 = objStart[j * nc + i1 + 1];
           draw(s0, s1 - s0, a0, an);
         }
-        draw(barrierStart, B.length, a0, an);
+        draw(globalStart, nGlobal, a0, an);
       }
     }
-    gl.readPixels(0, 0, this.rw, Math.min(nA, rows), gl.RGBA, gl.UNSIGNED_BYTE, this.pixels);
+
+    // read back, then pack into one compact block per agent
+    const cols = Math.ceil(nA / this.perCol);
+    const readH = Math.min(nA, this.perCol) * rh;
+    gl.readPixels(0, 0, cols * rw, readH, gl.RGBA, gl.UNSIGNED_BYTE, this.raw);
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
     gl.bindVertexArray(null);
+    const block = rw * rh * 4;
+    if (this.pixels.length < nA * block) this.pixels = new Uint8Array(Math.ceil(nA * 1.25) * block);
+    if (cols === 1) {
+      this.pixels.set(this.raw.subarray(0, nA * block));
+    } else {
+      const rowBytes = cols * rw * 4, line = rw * 4;
+      for (let i = 0; i < nA; i++) {
+        const bx = Math.floor(i / this.perCol) * line, by = (i % this.perCol) * rh;
+        for (let y = 0; y < rh; y++) {
+          const src = (by + y) * rowBytes + bx;
+          this.pixels.set(this.raw.subarray(src, src + line), i * block + y * line);
+        }
+      }
+    }
   }
 
   // camera: { mode: 'orbit'|'follow'|'eye', target:[x,y,z], dist, theta, phi }
@@ -423,7 +496,7 @@ export class Renderer {
     const dpr = Math.min(2, window.devicePixelRatio || 1);
     const w = Math.round(cv.clientWidth * dpr), h = Math.round(cv.clientHeight * dpr);
     if (cv.width !== w || cv.height !== h) { cv.width = w; cv.height = h; }
-    const { count } = this.writeInstances(world, cam.mode === 'eye' ? null : selected);
+    const count = this.writeInstances(world, cam.mode === 'eye' ? null : selected);
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
     gl.viewport(0, 0, w, h);
     gl.clearColor(0.03, 0.03, 0.05, 1);
@@ -432,11 +505,12 @@ export class Renderer {
     gl.bindVertexArray(this.vao);
     const aspect = w / h;
 
-    let eye, centre, fovy = 50 * Math.PI / 180;
+    let eye, centre, up = [0, 1, 0], fovy = 50 * Math.PI / 180;
     if (cam.mode === 'eye' && selected) {
-      const [ex, ey, ez, c, s] = agentEye(selected);
-      eye = [ex, ey, ez];
-      centre = [ex + c, ey, ez + s];
+      const { e, f, u } = agentEye(selected);
+      eye = e;
+      up = u;
+      centre = [e[0] + f[0], e[1] + f[1], e[2] + f[2]];
       fovy = 2 * Math.atan(Math.tan(selected.fov / 2) / aspect);
       gl.uniform1f(this.uLit, 0);
       perspective(this.proj, fovy, aspect, P.near, P.visionRange);
@@ -444,6 +518,7 @@ export class Renderer {
       if (cam.mode === 'follow' && selected) {
         cam.target[0] += (selected.x - cam.target[0]) * 0.15;
         cam.target[2] += (selected.z - cam.target[2]) * 0.15;
+        if (world.dims === 3) cam.target[1] += (selected.y - cam.target[1]) * 0.15;
       }
       const [tx, ty, tz] = cam.target;
       eye = [
@@ -455,7 +530,7 @@ export class Renderer {
       gl.uniform1f(this.uLit, 1);
       perspective(this.proj, fovy, aspect, 0.1, cam.dist * 2 + world.size * 2);
     }
-    lookAt(this.view, ...eye, ...centre);
+    lookAt(this.view, ...eye, ...centre, ...up);
     mul(this.vp, this.proj, this.view);
     gl.uniformMatrix4fv(this.uVP, false, this.vp);
     gl.drawArraysInstanced(gl.TRIANGLES, 0, 36, count);
@@ -463,8 +538,8 @@ export class Renderer {
     this.lastCam = { eye, centre, fovy, aspect };
   }
 
-  // Ray from the main camera through a canvas point, intersected with the ground.
-  pickGround(px, py) {
+  // World-space ray from the main camera through a canvas point.
+  pickRay(px, py) {
     const c = this.lastCam;
     if (!c) return null;
     const cv = this.canvas;
@@ -475,11 +550,8 @@ export class Renderer {
     let rx = -fz, rz = fx; l = Math.hypot(rx, rz) || 1; rx /= l; rz /= l;
     const ux = -rz * fy, uy = rz * fx - rx * fz, uz = rx * fy;
     const t = Math.tan(c.fovy / 2);
-    const dx = fx + (rx * nx * c.aspect + ux * ny) * t;
-    const dy = fy + uy * ny * t;
-    const dz = fz + (rz * nx * c.aspect + uz * ny) * t;
-    if (dy >= -1e-6) return null;
-    const k = (0.4 - ey) / dy;
-    return [ex + dx * k, ez + dz * k];
+    const d = [fx + (rx * nx * c.aspect + ux * ny) * t, fy + uy * ny * t, fz + (rz * nx * c.aspect + uz * ny) * t];
+    l = Math.hypot(...d);
+    return { o: [ex, ey, ez], d: d.map((v) => v / l) };
   }
 }

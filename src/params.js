@@ -17,6 +17,14 @@ export const P = {
   // motion
   maxTurn: 0.12,          // radians per step at full yaw output
 
+  // 3D volume worlds: agents swim through a volume instead of walking a plane
+  volumeHeight: 15,       // at world size 100; scales with world width
+  maxPitchRate: 0.12,     // radians per step at full pitch output (pitch turns like yaw)
+  retinaHeight3D: 8,      // retina rows rendered per agent in 3D
+  retinaVAspect: 0.5,     // tan(vertical fov) / tan(horizontal fov)
+  volumeFoodScale: 3,     // extra food in volumes, which are sparser to search
+  volumeAgentScale: 2,    // more agents in volumes, so mates can find each other
+
   // genetic ranges (genes are 0..1, decoded into these)
   lifespan: [1200, 4000],
   size: [0.7, 1.5],

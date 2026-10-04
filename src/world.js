@@ -2,7 +2,7 @@
 
 import { P, WORLDS } from './params.js';
 import { makeRng } from './rng.js';
-import { GENE, decode, randomGenome, mutate, crossover } from './genome.js';
+import { GENE, N_OUT, decode, randomGenome, mutate, crossover } from './genome.js';
 import { Brain, OUT } from './brain.js';
 
 const DEG = Math.PI / 180;
@@ -11,14 +11,18 @@ const CELL = 5;
 let nextId = 1;
 
 export class Agent {
-  constructor(genome, x, z, yaw, energy, rng, generation = 0) {
+  // y is the eye/body-centre height: fixed at eye level on the flat world.
+  constructor(genome, x, y, z, yaw, energy, rng, generation = 0, dims = 2) {
     this.id = nextId++;
     this.genome = genome;
     const d = (this.traits = decode(genome));
-    this.brain = new Brain(genome, d, rng);
+    this.dims = dims;
+    this.brain = new Brain(genome, d, rng, dims);
     this.x = x;
+    this.y = dims === 3 ? y : P.eyeHeight;
     this.z = z;
     this.yaw = yaw;
+    this.pitch = 0;
     this.size = d.size;
     this.r = 0.6 * d.size;
     this.len = 1.2 * d.size;
@@ -35,26 +39,34 @@ export class Agent {
     this.attackedAt = -1;
     this.speed = 0;
     this.fov = 60 * DEG;
-    this.out = new Float32Array(7).fill(0.5);
+    this.out = new Float32Array(N_OUT).fill(0.5);
     this.dead = null;
   }
 
-  // Load the retina row and internal state into the input neurons, then step.
-  think(pixels, row, rw, rng) {
-    const b = this.brain, s = b.state, base = row * rw * 4;
+  // Load the retina block (rw x rh pixels, agent i's block at i * rw * rh * 4)
+  // and internal state into the input neurons, then step. Each vision neuron
+  // averages one colour channel over its cell of a cols x rows grid.
+  think(pixels, i, rw, rh, rng) {
+    const b = this.brain, s = b.state, base = i * rw * rh * 4;
     s[0] = rng();
     s[1] = this.energy / this.maxEnergy;
+    const rows = b.visRows;
     for (let c = 0; c < 3; c++) {
-      const start = b.starts[2 + c], n = b.sizes[2 + c];
-      for (let k = 0; k < n; k++) {
-        const x0 = Math.floor((k * rw) / n), x1 = Math.floor(((k + 1) * rw) / n);
+      const start = b.starts[2 + c], cols = b.visCols[c];
+      for (let k = 0; k < cols * rows; k++) {
+        const kx = k % cols, ky = (k / cols) | 0;
+        const x0 = Math.floor((kx * rw) / cols), x1 = Math.floor(((kx + 1) * rw) / cols);
+        const y0 = Math.floor((ky * rh) / rows), y1 = Math.floor(((ky + 1) * rh) / rows);
         let sum = 0;
-        for (let x = x0; x < x1; x++) sum += pixels[base + x * 4 + c];
-        s[start + k] = sum / ((x1 - x0) * 255);
+        for (let y = y0; y < y1; y++) {
+          const line = base + y * rw * 4;
+          for (let x = x0; x < x1; x++) sum += pixels[line + x * 4 + c];
+        }
+        s[start + k] = sum / ((x1 - x0) * (y1 - y0) * 255);
       }
     }
     b.step();
-    for (let o = 0; o < 7; o++) this.out[o] = b.output(o);
+    for (let o = 0; o < N_OUT; o++) this.out[o] = b.output(o);
   }
 
   act(world) {
@@ -64,8 +76,18 @@ export class Agent {
     this.speed = o[OUT.speed] * t.maxSpeed;
     this.fov = (P.fovMin + (P.fovMax - P.fovMin) * o[OUT.focus]) * DEG;
 
-    const nx = this.x + Math.cos(this.yaw) * this.speed;
-    const nz = this.z + Math.sin(this.yaw) * this.speed;
+    let horiz = this.speed;
+    if (this.dims === 3) {
+      // pitch is a turning rate like yaw, so a constant output loops through the
+      // volume rather than pinning the agent against the floor or ceiling
+      this.pitch += (o[OUT.pitch] - 0.5) * 2 * P.maxPitchRate;
+      this.pitch = Math.atan2(Math.sin(this.pitch), Math.cos(this.pitch));
+      horiz = this.speed * Math.cos(this.pitch);
+      const ny = this.y + this.speed * Math.sin(this.pitch);
+      this.y = Math.min(world.height - this.r, Math.max(this.r, ny));
+    }
+    const nx = this.x + Math.cos(this.yaw) * horiz;
+    const nz = this.z + Math.sin(this.yaw) * horiz;
     if (!world.blocked(nx, nz, this.r)) {
       this.x = nx;
       this.z = nz;
@@ -104,7 +126,8 @@ export class Agent {
 }
 
 export class World {
-  constructor(layout = 'patches', seed = (Math.random() * 2 ** 32) >>> 0, size = P.worldSize) {
+  // dims: 2 for Polyworld's flat world, 3 for a volume agents swim through.
+  constructor(layout = 'patches', seed = (Math.random() * 2 ** 32) >>> 0, size = P.worldSize, dims = 2) {
     this.seed = seed;
     this.rng = makeRng(seed);
     this.layoutKey = layout;
@@ -112,14 +135,18 @@ export class World {
     // Layouts are drawn on a 100x100 world; larger worlds scale coordinates
     // linearly and populations, food rates and caps by area.
     this.size = size;
+    this.dims = dims;
     const k = size / 100, area = k * k;
-    this.minAgents = Math.round(P.minAgents * area);
-    this.maxAgents = Math.round(P.maxAgents * area);
-    this.maxFood = Math.round(P.food.maxTotal * area);
+    this.height = dims === 3 ? P.volumeHeight * k : 0;
+    const foodScale = dims === 3 ? P.volumeFoodScale : 1;
+    const agentScale = dims === 3 ? P.volumeAgentScale : 1;
+    this.minAgents = Math.round(P.minAgents * area * agentScale);
+    this.maxAgents = Math.round(P.maxAgents * area * agentScale);
+    this.maxFood = Math.round(P.food.maxTotal * area * foodScale);
     this.corpseEnergy = L.corpseEnergy ?? P.corpseEnergy;
     this.moveCost = P.cost.move * (L.moveCostScale ?? 1);
     this.patches = L.patches.map((p) => ({
-      rect: p.rect.map((v) => v * k), rate: p.rate * area, max: Math.round(p.max * area), count: 0, acc: 0,
+      rect: p.rect.map((v) => v * k), rate: p.rate * area * foodScale, max: Math.round(p.max * area * foodScale), count: 0, acc: 0,
     }));
     this.barriers = L.barriers.map((b) => {
       const [x0, z0, x1, z1] = b.map((v) => v * k);
@@ -141,7 +168,7 @@ export class World {
     for (const p of this.patches) {
       while (p.count < p.max / 2) this.spawnFood(p);
     }
-    for (let i = 0; i < Math.round(P.initAgents * area); i++) this.agents.push(this.makeGAAgent(true));
+    for (let i = 0; i < Math.round(P.initAgents * area * agentScale); i++) this.agents.push(this.makeGAAgent(true));
   }
 
   // --- geometry -----------------------------------------------------------
@@ -169,13 +196,18 @@ export class World {
     return [this.size / 2, this.size / 2];
   }
 
+  // Random height within the volume (eye level on the flat world).
+  randomHeight(r) {
+    return this.dims === 3 ? r + this.rng() * (this.height - 2 * r) : P.eyeHeight;
+  }
+
   // --- food ---------------------------------------------------------------
 
   spawnFood(patch) {
     const pi = this.patches.indexOf(patch);
     const [x, z] = this.randomFreeSpot(0.6, patch.rect);
     const f = P.food;
-    this.food.push({ x, z, energy: f.minEnergy + this.rng() * (f.maxEnergy - f.minEnergy), patch: pi });
+    this.food.push({ x, y: this.randomHeight(0.6), z, energy: f.minEnergy + this.rng() * (f.maxEnergy - f.minEnergy), patch: pi });
     patch.count++;
   }
 
@@ -202,7 +234,7 @@ export class World {
     const size = P.size[0] + (P.size[1] - P.size[0]) * genome[GENE.size];
     const [x, z] = this.randomFreeSpot(0.6 * size);
     const energy = P.maxEnergyPerSize * size * P.initEnergyFrac;
-    return new Agent(genome, x, z, rng() * Math.PI * 2, energy, rng, gen);
+    return new Agent(genome, x, this.randomHeight(0.6 * size), z, rng() * Math.PI * 2, energy, rng, gen, this.dims);
   }
 
   recordElite(a) {
@@ -228,8 +260,8 @@ export class World {
     a.mateWait = b.mateWait = P.mateWait;
     a.offspring++;
     b.offspring++;
-    const child = new Agent(genome, x, z, rng() * Math.PI * 2, ea + eb, rng,
-      Math.max(a.generation, b.generation) + 1);
+    const child = new Agent(genome, x, (a.y + b.y) / 2, z, rng() * Math.PI * 2, ea + eb, rng,
+      Math.max(a.generation, b.generation) + 1, this.dims);
     child.parents = [a.id, b.id];
     births.push(child);
   }
@@ -248,7 +280,7 @@ export class World {
   }
 
   interact(births) {
-    const n = this.ncell, inv = 1 / CELL;
+    const n = this.ncell, inv = 1 / CELL, vol = this.dims === 3;
     for (const a of this.agents) {
       const cx = Math.floor(a.x * inv), cz = Math.floor(a.z * inv);
       const eat = a.out[OUT.eat], fight = a.out[OUT.fight], mate = a.out[OUT.mate];
@@ -262,8 +294,8 @@ export class World {
             for (const f of this.foodCells[cell]) {
               if (f.energy <= 0) continue;
               const lim = a.r + World.foodHalf(f);
-              const dx = f.x - a.x, dz = f.z - a.z;
-              if (dx * dx + dz * dz > lim * lim) continue;
+              const dx = f.x - a.x, dz = f.z - a.z, dy = vol ? f.y - a.y : 0;
+              if (dx * dx + dy * dy + dz * dz > lim * lim) continue;
               const amt = Math.min(f.energy, P.eatRate * eat, a.maxEnergy - a.energy);
               if (amt <= 0) continue;
               f.energy -= amt;
@@ -275,14 +307,19 @@ export class World {
 
           for (const b of this.agentCells[cell]) {
             if (b === a) continue;
-            const dx = b.x - a.x, dz = b.z - a.z;
-            const lim = a.r + b.r, d2 = dx * dx + dz * dz;
+            const dx = b.x - a.x, dz = b.z - a.z, dy = vol ? b.y - a.y : 0;
+            const lim = a.r + b.r, d2 = dx * dx + dy * dy + dz * dz;
             if (d2 > lim * lim) continue;
 
             if (a.id < b.id) {
               // soft separation so bodies don't pile up
               const d = Math.sqrt(d2) || 1e-3, push = (lim - d) * 0.25;
               const px = (dx / d) * push, pz = (dz / d) * push;
+              if (vol) {
+                const py = (dy / d) * push;
+                a.y = Math.min(this.height - a.r, Math.max(a.r, a.y - py));
+                b.y = Math.min(this.height - b.r, Math.max(b.r, b.y + py));
+              }
               if (!this.blocked(a.x - px, a.z - pz, a.r)) { a.x -= px; a.z -= pz; }
               if (!this.blocked(b.x + px, b.z + pz, b.r)) { b.x += px; b.z += pz; }
 
@@ -304,10 +341,10 @@ export class World {
     }
   }
 
-  // One simulation step. `pixels` holds one retina row per agent, in agent order.
-  update(pixels, rw) {
+  // One simulation step. `pixels` holds one rw x rh retina block per agent, in agent order.
+  update(pixels, rw, rh = 1) {
     const A = this.agents, rng = this.rng;
-    for (let i = 0; i < A.length; i++) A[i].think(pixels, i, rw, rng);
+    for (let i = 0; i < A.length; i++) A[i].think(pixels, i, rw, rh, rng);
     for (const a of A) a.act(this);
 
     this.buildGrid();
@@ -326,7 +363,7 @@ export class World {
       this.interval.deaths++;
       this.recordElite(a);
       if (this.food.length < this.maxFood) {
-        this.food.push({ x: a.x, z: a.z, energy: this.corpseEnergy * a.size, patch: -1 });
+        this.food.push({ x: a.x, y: a.y, z: a.z, energy: this.corpseEnergy * a.size, patch: -1 });
       }
     }
     for (const c of births) alive.push(c);

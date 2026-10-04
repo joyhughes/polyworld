@@ -9,20 +9,22 @@
 import { P } from './params.js';
 import { GENE, MAX_INTERNAL, N_IN, N_OUT, N_SRC, N_TGT } from './genome.js';
 
-export const OUT = { eat: 0, mate: 1, fight: 2, speed: 3, yaw: 4, light: 5, focus: 6 };
+export const OUT = { eat: 0, mate: 1, fight: 2, speed: 3, yaw: 4, light: 5, focus: 6, pitch: 7 };
 
 export class Brain {
-  constructor(g, traits, rng) {
+  constructor(g, traits, rng, dims = 2) {
+    // vision groups are visCols[c] x visRows neurons (a single row on the flat world)
+    this.visRows = dims === 3 ? traits.visionRows : 1;
+    this.visCols = [traits.nRed, traits.nGreen, traits.nBlue];
+    this.numOutputs = dims === 3 ? N_OUT : N_OUT - 1;
     const sizes = new Array(N_SRC).fill(0);
     sizes[0] = 1;
     sizes[1] = 1;
-    sizes[2] = traits.nRed;
-    sizes[3] = traits.nGreen;
-    sizes[4] = traits.nBlue;
+    for (let c = 0; c < 3; c++) sizes[2 + c] = this.visCols[c] * this.visRows;
     for (let i = 0; i < MAX_INTERNAL; i++) {
       sizes[N_IN + i] = i < traits.numInternal ? traits.exc[i] + traits.inh[i] : 0;
     }
-    for (let o = 0; o < N_OUT; o++) sizes[N_IN + MAX_INTERNAL + o] = 1;
+    for (let o = 0; o < this.numOutputs; o++) sizes[N_IN + MAX_INTERNAL + o] = 1;
 
     const starts = new Array(N_SRC);
     let n = 0;
@@ -118,6 +120,6 @@ export class Brain {
   }
 
   output(o) {
-    return this.state[this.outStart + o];
+    return o < this.numOutputs ? this.state[this.outStart + o] : 0.5;
   }
 }

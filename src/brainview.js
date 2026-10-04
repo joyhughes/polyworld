@@ -179,7 +179,7 @@ export class BrainView {
     if (key === this.layoutKey) return this.pos;
     this.layoutKey = key;
     const n = b.numNeurons, x = new Float32Array(n), y = new Float32Array(n);
-    const top = 40, bottom = H - 16, padL = 70, padR = 120;
+    const top = 62, bottom = H - 16, padL = 70, padR = 120;
     const shape = new Uint8Array(n); // 0 circle, 1 square (inhibitory)
     const labels = [];
 
@@ -210,13 +210,14 @@ export class BrainView {
         shape[id] = b.sign[id] < 0 ? 1 : 0;
       }
       const ne = b.sign.subarray(b.starts[g], b.starts[g] + m).filter((s) => s > 0).length;
-      labels.push({ text: `${groupName(g)}  ${ne}E ${m - ne}I`, x: gx, y: top - 16, align: 'center' });
+      labels.push({ text: groupName(g), x: gx, y: top - 22, align: 'center' });
+      labels.push({ text: `${ne}E ${m - ne}I`, x: gx, y: top - 10, align: 'center' });
     });
 
     // outputs
-    const oStart = b.outStart, osp = Math.min(40, (bottom - top) / 7);
-    let oy = top + ((bottom - top) - osp * 6) / 2;
-    for (let o = 0; o < 7; o++) { x[oStart + o] = W - padR; y[oStart + o] = oy; oy += osp; }
+    const nOut = b.numOutputs, oStart = b.outStart, osp = Math.min(40, (bottom - top) / nOut);
+    let oy = top + ((bottom - top) - osp * (nOut - 1)) / 2;
+    for (let o = 0; o < nOut; o++) { x[oStart + o] = W - padR; y[oStart + o] = oy; oy += osp; }
 
     this.pos = { x, y, shape, labels, r: Math.max(2.5, Math.min(7, sp * 0.36)), ro: Math.max(5, Math.min(9, osp * 0.25)) };
     return this.pos;
@@ -304,7 +305,7 @@ export class BrainView {
     }
     ctx.textAlign = 'left';
     const thr = { eat: P.eatThreshold, mate: P.mateThreshold, fight: P.fightThreshold };
-    for (let o = 0; o < 7; o++) {
+    for (let o = 0; o < b.numOutputs; o++) {
       const i = b.outStart + o, v = st[i], name = OUTPUT_NAMES[o];
       const bx = x[i] + ro + 8, bw = 60;
       ctx.fillStyle = '#d8dbe2';
@@ -319,16 +320,18 @@ export class BrainView {
 
     // the retina this brain is looking through
     if (retina) {
-      const rw = retina.length / 4, img = new ImageData(rw, 1);
-      img.data.set(retina);
-      const off = new OffscreenCanvas(rw, 1);
+      const rw = P.retinaWidth, rh = retina.length / 4 / rw, line = rw * 4;
+      const img = new ImageData(rw, rh);
+      for (let yy = 0; yy < rh; yy++) img.data.set(retina.subarray(yy * line, (yy + 1) * line), (rh - 1 - yy) * line);
+      const off = new OffscreenCanvas(rw, rh);
       off.getContext('2d').putImageData(img, 0, 0);
       ctx.imageSmoothingEnabled = false;
-      ctx.drawImage(off, 8, 8, 128, 10);
+      const dh = rh > 1 ? 24 : 10;
+      ctx.drawImage(off, 8, 8, 128, dh);
       ctx.strokeStyle = '#262a33';
-      ctx.strokeRect(7.5, 7.5, 129, 11);
+      ctx.strokeRect(7.5, 7.5, 129, dh + 1);
       ctx.fillStyle = '#8a90a0';
-      ctx.fillText('retina', 142, 17);
+      ctx.fillText('retina', 142, 8 + dh / 2 + 4);
     }
 
     // legend / tooltip

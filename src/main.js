@@ -18,11 +18,12 @@ function newWorld() {
   try {
     localStorage.setItem('pw.layout', $('layout').value);
     localStorage.setItem('pw.size', $('worldSize').value);
+    localStorage.setItem('pw.dims', $('dims').value);
   } catch {}
-  world = new World($('layout').value, undefined, +$('worldSize').value);
+  world = new World($('layout').value, undefined, +$('worldSize').value, +$('dims').value);
   selectedId = null;
   setCam('orbit');
-  cam.target = [world.size / 2, 0, world.size / 2];
+  cam.target = [world.size / 2, world.height / 3, world.size / 2];
   cam.dist = world.size * 1.15;
 }
 
@@ -35,7 +36,7 @@ let visionOrder = [];  // agent order of the rows in renderer.pixels
 function stepOnce() {
   renderer.renderVision(world);
   visionOrder = world.agents.slice();
-  world.update(renderer.pixels, renderer.rw);
+  world.update(renderer.pixels, renderer.rw, renderer.rh);
   brainView.record(selected());
 }
 
@@ -50,6 +51,7 @@ for (const [k, L] of Object.entries(WORLDS)) {
 $('reset').onclick = newWorld;
 $('layout').onchange = newWorld;
 $('worldSize').onchange = newWorld;
+$('dims').onchange = newWorld;
 const setPaused = (p) => { paused = p; $('pause').textContent = p ? 'Run' : 'Pause'; };
 $('pause').onclick = () => setPaused(!paused);
 $('step').onclick = () => { setPaused(true); stepOnce(); };
@@ -77,10 +79,25 @@ function openBrain(on = true) {
 }
 $('openBrain').onclick = () => openBrain(true);
 
+// Agent a's retina block (rw x rh, bottom row first, as GL reads it).
 function retinaOf(a) {
-  const row = a ? visionOrder.indexOf(a) : -1, rw = renderer.rw;
-  if (row < 0 || row >= renderer.rows) return null;
-  return renderer.pixels.subarray(row * rw * 4, (row + 1) * rw * 4);
+  const i = a ? visionOrder.indexOf(a) : -1, block = renderer.rw * renderer.rh * 4;
+  if (i < 0 || (i + 1) * block > renderer.pixels.length) return null;
+  return renderer.pixels.subarray(i * block, (i + 1) * block);
+}
+
+// ImageData of `count` stacked retina blocks, each flipped so up is up.
+function retinaImage(first, count) {
+  const rw = renderer.rw, rh = renderer.rh, line = rw * 4, src = renderer.pixels;
+  const img = new ImageData(rw, Math.max(1, count * rh));
+  for (let i = 0; i < count; i++) {
+    for (let y = 0; y < rh; y++) {
+      const s = ((first + i) * rh + y) * line;
+      if (s + line > src.length) return img;
+      img.data.set(src.subarray(s, s + line), (i * rh + (rh - 1 - y)) * line);
+    }
+  }
+  return img;
 }
 
 function selectFittest() {
@@ -127,14 +144,18 @@ cv.addEventListener('pointermove', (e) => {
 cv.addEventListener('pointerup', (e) => {
   if (drag && Math.hypot(e.clientX - drag.x0, e.clientY - drag.y0) < 4) {
     const r = cv.getBoundingClientRect();
-    const g = renderer.pickGround(e.clientX - r.left, e.clientY - r.top);
-    if (g) {
-      // pick radius grows with camera distance so tiny far-away agents stay clickable
-      const pr = Math.max(3, cam.dist * 0.03);
-      let best = null, bd = pr * pr;
+    const ray = renderer.pickRay(e.clientX - r.left, e.clientY - r.top);
+    if (ray) {
+      // nearest agent to the ray; tolerance grows with distance so far-away agents stay clickable
+      const { o, d } = ray;
+      let best = null, bd = Infinity;
       for (const a of world.agents) {
-        const d = (a.x - g[0]) ** 2 + (a.z - g[1]) ** 2;
-        if (d < bd) { bd = d; best = a; }
+        const vx = a.x - o[0], vy = (world.dims === 3 ? a.y : a.hgt / 2) - o[1], vz = a.z - o[2];
+        const t = vx * d[0] + vy * d[1] + vz * d[2];
+        if (t <= 0) continue;
+        const px = vx - t * d[0], py = vy - t * d[1], pz = vz - t * d[2];
+        const off = Math.sqrt(px * px + py * py + pz * pz), tol = Math.max(1.5, t * 0.025);
+        if (off < tol && off / tol < bd) { bd = off / tol; best = a; }
       }
       selectedId = best ? best.id : null;
       if (!best && cam.mode !== 'orbit') setCam('orbit');
@@ -210,15 +231,12 @@ function drawStats() {
 }
 
 function drawWall() {
-  const c = $('wall'), n = visionOrder.length, rw = renderer.rw;
-  const rows = Math.max(1, n);
+  const c = $('wall'), n = visionOrder.length;
+  const rows = Math.max(1, n * renderer.rh);
   if (c.height !== rows) c.height = rows;
   c.style.height = Math.min(480, Math.max(60, rows * 1.5)) + 'px';
-  const ctx = c.getContext('2d');
-  const img = ctx.createImageData(rw, rows);
-  // GL row 0 is the bottom of the framebuffer = agent 0; show agent 0 at the top
-  img.data.set(renderer.pixels.subarray(0, rw * rows * 4));
-  ctx.putImageData(img, 0, 0);
+  // one block per agent, agent 0 at the top
+  c.getContext('2d').putImageData(retinaImage(0, n), 0, 0);
 }
 
 let outputBars = null;
@@ -241,7 +259,7 @@ function buildOutputBars() {
       bar.append(t);
     }
     el.append(label, bar);
-    return fill;
+    return { label, bar, fill };
   });
 }
 buildOutputBars();
@@ -268,29 +286,33 @@ function drawAgent() {
   $('agentInfo').innerHTML = info.map(([k, v]) => `<div><span>${k}</span> ${v}</div>`).join('');
 
   // retina row
-  const row = visionOrder.indexOf(a), rw = renderer.rw;
-  const pov = $('pov').getContext('2d');
-  const img = pov.createImageData(rw, 1);
-  if (row >= 0 && row < renderer.rows) img.data.set(renderer.pixels.subarray(row * rw * 4, (row + 1) * rw * 4));
-  pov.putImageData(img, 0, 0);
+  const i = visionOrder.indexOf(a), povC = $('pov'), rh = renderer.rh;
+  if (povC.height !== rh) { povC.height = rh; povC.style.height = (rh > 1 ? 64 : 22) + 'px'; }
+  if (i >= 0) povC.getContext('2d').putImageData(retinaImage(i, 1), 0, 0);
 
-  // vision neurons as three rows of cells
-  const pn = $('povN'), maxN = Math.max(b.sizes[2], b.sizes[3], b.sizes[4]);
-  if (pn.width !== maxN) pn.width = maxN;
+  // vision neurons: a cols x rows grid per colour channel, stacked red/green/blue
+  const pn = $('povN'), rows = b.visRows, maxN = Math.max(...b.visCols);
+  if (pn.width !== maxN || pn.height !== 3 * rows) {
+    pn.width = maxN; pn.height = 3 * rows; pn.style.height = (rows > 1 ? 60 : 30) + 'px';
+  }
   const nctx = pn.getContext('2d');
   nctx.fillStyle = '#0d0e12';
-  nctx.fillRect(0, 0, pn.width, 3);
+  nctx.fillRect(0, 0, pn.width, pn.height);
   for (let c = 0; c < 3; c++) {
-    const n = b.sizes[2 + c];
-    for (let k = 0; k < n; k++) {
+    const cols = b.visCols[c];
+    for (let k = 0; k < cols * rows; k++) {
+      const kx = k % cols, ky = (k / cols) | 0;
       const v = Math.round(b.state[b.starts[2 + c] + k] * 255);
       nctx.fillStyle = c === 0 ? `rgb(${v},0,0)` : c === 1 ? `rgb(0,${v},0)` : `rgb(0,0,${v})`;
-      const x0 = (k * pn.width) / n;
-      nctx.fillRect(x0, c, pn.width / n, 1);
+      nctx.fillRect((kx * pn.width) / cols, c * rows + (rows - 1 - ky), pn.width / cols, 1);
     }
   }
 
-  for (let o = 0; o < OUTPUT_NAMES.length; o++) outputBars[o].style.width = a.out[o] * 100 + '%';
+  outputBars.forEach((ob, o) => {
+    const on = o < b.numOutputs;
+    ob.label.hidden = ob.bar.hidden = !on;
+    if (on) ob.fill.style.width = a.out[o] * 100 + '%';
+  });
 
   drawBrain(b);
 }
@@ -333,6 +355,8 @@ try {
   const l = localStorage.getItem('pw.layout'), sz = localStorage.getItem('pw.size');
   if (l && WORLDS[l]) $('layout').value = l;
   if (sz && [...$('worldSize').options].some((o) => o.value === sz)) $('worldSize').value = sz;
+  const dm = localStorage.getItem('pw.dims');
+  if (dm === '2' || dm === '3') $('dims').value = dm;
 } catch {}
 newWorld();
 requestAnimationFrame(loop);

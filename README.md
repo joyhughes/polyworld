@@ -13,7 +13,7 @@ python3 serve.py   # then open http://localhost:8000 (no-cache, so edits show on
 ## What is simulated
 
 - **Vision.** Each step, every agent's point of view is rendered with WebGL into
-  its own 1×32-pixel row of an offscreen framebuffer (see *World size* below
+  its own 32×1-pixel row of an offscreen framebuffer (32×8 in a 3D volume) (see *World size* below
   for how this is batched). All rows are read back in
   one call, and each agent's red, green and blue vision neurons average their part
   of that row. The *Vision* panel shows every agent's retina, one row each.
@@ -27,7 +27,8 @@ python3 serve.py   # then open http://localhost:8000 (no-cache, so edits show on
   set by its source neuron. Weights learn by a Hebbian rule,
   `w += lr·(post−0.5)·(pre−0.5)`, clamped to their sign. Inputs are a random
   neuron, energy level and vision. Outputs are eat, mate, fight, speed, yaw,
-  light (how bright the front face is) and focus (field of view).
+  light (how bright the front face is) and focus (field of view), plus pitch
+  in 3D volumes.
 - **Behaviour and energy.** Everything costs energy: being alive, neurons,
   synapses, moving, turning, and each action. Agents eat food on contact.
   Fighting drains the agent it touches. Two agents that touch while both want to
@@ -43,6 +44,35 @@ With the default parameters, natural reproduction typically takes over somewhere
 between 15k and 25k steps. The population then climbs to the cap and food
 becomes the limiting resource. All tunables are in `src/params.js`, including
 the world layouts (patches, a divided world, foraging bands and an open field).
+
+**3D volume** (the *Flat / 3D volume* selector) turns any layout into a tank
+that agents swim through. It is 15 units deep at 100², scaling with world width.
+What changes:
+- **Vision:** each retina becomes 32×8 pixels. A `visionRows` gene splits each
+  colour channel into 1–4 rows of neurons, and the floor is visible so agents
+  can tell up from down.
+- **Pitch:** a new *pitch* output turns the agent up or down, the same way *yaw*
+  turns it left or right.
+- **Contact and food:** eating, mating, fighting and collisions use 3D
+  distance, and food floats at random depths.
+
+Two findings shaped the design:
+- **Pitch had to be a turning rate.** When the pitch output set the climb angle
+  directly, random brains (which hold their outputs nearly constant) pinned
+  themselves against the ceiling or floor. Nothing evolved in 40k steps. As a
+  turning rate, a constant output makes agents loop and spiral through the
+  volume.
+- **Volumes need more of everything.** Search in 3D is much harder, so volumes
+  get 3× the food and 2× the agent limits. With those settings, the steady-state
+  GA stopped being needed at about 32k steps (versus 10–20k on the flat world).
+  The population then held at 360–400 agents, with mean generation past 160 by
+  60k steps.
+
+Rendering is shared between the two modes. Every object carries a height and a
+pitch, and each agent's view goes into its own block of the vision framebuffer,
+packed into columns past the GPU's texture-height limit. Flat-world vision is
+pixel-identical to before; 3D vision matches an independent per-agent render on
+99.7% of pixels.
 
 **Indolent cannibals** is a layout that recreates the most famous accident in
 Polyworld's history. In an early run, a dead agent became more food energy than

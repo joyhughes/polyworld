@@ -96,6 +96,10 @@
         <option value="400">400 × 400</option>
         <option value="600">600 × 600</option>
       </select>
+      <select id="dims" title="Flat world (Polyworld) or a 3D volume agents swim through">
+        <option value="2">Flat</option>
+        <option value="3">3D volume</option>
+      </select>
       <button id="reset">New world</button>
     </div>
     <div class="row">
@@ -124,7 +128,7 @@
     <div id="retinas">
       <canvas id="wall" class="panel" width="32" height="240"></canvas>
       <div class="muted" style="flex:1">
-        Every agent's 1-pixel retina for this step, one row per agent, rendered from its own point of view.
+        Every agent's retina for this step, one block per agent, rendered from its own point of view (one row on the flat world, eight in a 3D volume).
         Agents show red when fighting, blue when trying to mate; their green is genetic. Food is green; walls are grey.
         The front face brightens with the <i>light</i> output.
       </div>
