@@ -31,10 +31,18 @@ export const P = {
     g: 0.012,             // downward acceleration per step
     jump: 0.22,           // upward speed of a jump
     jumpThreshold: 0.75,  // lift output needed to jump from the ground
-    maxLift: 0.026,       // upward acceleration at full lift output with full wings
+    maxLift: 0.026,       // upward acceleration at full lift output with full wings, at ground level
+    airHeight: 20,        // the air thins with height: lift falls to zero here (1 - (y/airHeight)^2),
+                          // so fliers cruise at the height where lift balances gravity
     drag: 0.97,           // vertical velocity kept per step in the air
     reach: 0.6,           // how far above its body an agent can graze
     latitude: 45,         // default; the UI slider changes it live
+    band: [70, -20],      // default north and south edge latitudes for a round world
+  },
+  hibernate: {
+    metabolism: 0.1,      // fraction of normal running costs while torpid
+    ageRate: 0.5,         // torpid agents age at this rate
+    wakeMargin: 0.08,     // wake when daylight rises this far above the threshold
   },
   plants: {
     yearLength: 6000,     // steps per year (seasons)
@@ -59,6 +67,12 @@ export const P = {
     seedLife: 1500,       // seeds that cannot sprout rot after this long
     foodScale: 4,         // food cap multiplier in gravity worlds (fruit + carrion)
     foodValue: 5,         // animal energy per unit of plant matter (leaf, stem or fruit)
+    seasonLag: 750,       // temperature lags sunlight by this many steps (snow lingers into spring)
+    resorb: 0.5,          // fraction of leaf matter recovered into the reserve on going dormant
+    springFlush: 0.4,     // fraction of the reserve put into new leaves on waking
+    dormantCost: 0.15,    // maintenance multiplier while dormant
+    sproutLight: 0.35,    // seeds wait for at least this much daylight to sprout
+    coldLight: 0.3,       // below this, seeds keep (their rot clock stops)
   },
 
   // genetic ranges (genes are 0..1, decoded into these)
@@ -90,7 +104,7 @@ export const P = {
     fight: 0.12,      // times strength
     light: 0.01,
     wings: 0.015,     // per step, times wings * size (gravity worlds)
-    flap: 0.05,       // per airborne step, times lift * wings * size
+    flap: 0.025,      // per airborne step, times lift * wings * size
     jump: 0.3,        // per jump, times size
   },
   eatThreshold: 0.3,

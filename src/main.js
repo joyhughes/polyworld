@@ -23,8 +23,8 @@ function newWorld() {
   } catch {}
   const mode = $('dims').value;
   world = new World($('layout').value, undefined, +$('worldSize').value, mode === '2' ? 2 : 3, mode === 'g');
-  world.latitude = +$('lat').value;
-  $('latRow').hidden = !world.gravity;
+  applyLatitude();
+  $('latRow').hidden = $('season').hidden = !world.gravity;
   document.querySelectorAll('.grav').forEach((el) => { el.hidden = !world.gravity; });
   selectedId = null;
   setCam('orbit');
@@ -57,16 +57,25 @@ $('reset').onclick = newWorld;
 $('layout').onchange = newWorld;
 $('worldSize').onchange = newWorld;
 $('dims').onchange = newWorld;
-const latLabel = () => {
-  const v = +$('lat').value;
-  $('latVal').textContent = `${Math.abs(v)}°${v > 0 ? 'N' : v < 0 ? 'S' : ''}`;
-};
-$('lat').oninput = () => {
-  if (world) world.latitude = +$('lat').value;
-  latLabel();
-  try { localStorage.setItem('pw.lat', $('lat').value); } catch {}
-};
-latLabel();
+const fmtLat = (v) => `${Math.abs(v)}°${v > 0 ? 'N' : v < 0 ? 'S' : ''}`;
+// Latitude: one value everywhere, or (round world) a north-south band across the map.
+function applyLatitude() {
+  const round = $('round').checked;
+  $('latSingle').hidden = round;
+  $('latBand').hidden = !round;
+  $('latVal').textContent = fmtLat(+$('lat').value);
+  $('latNVal').textContent = fmtLat(+$('latN').value);
+  $('latSVal').textContent = fmtLat(+$('latS').value);
+  if (world) {
+    world.latitude = +$('lat').value;
+    world.latBand = round ? [+$('latN').value, +$('latS').value] : null;
+  }
+  try {
+    localStorage.setItem('pw.lat', JSON.stringify({ lat: $('lat').value, n: $('latN').value, s: $('latS').value, round }));
+  } catch {}
+}
+for (const id of ['round', 'lat', 'latN', 'latS']) $(id).oninput = applyLatitude;
+$('round').onchange = applyLatitude;
 const setPaused = (p) => { paused = p; $('pause').textContent = p ? 'Run' : 'Pause'; };
 $('pause').onclick = () => setPaused(!paused);
 $('step').onclick = () => { setPaused(true); stepOnce(); };
@@ -233,6 +242,56 @@ function drawCharts() {
   ], n);
 }
 
+// Season dial: the globe seen side-on with the sun to the left (tilted by the
+// declination), the latitude band the world covers, and the year.
+function drawSeason() {
+  const c = $('season'), ctx = c.getContext('2d'), W = c.width, k = W / 150;
+  ctx.setTransform(k, 0, 0, k, 0, 0);
+  ctx.clearRect(0, 0, 150, 170);
+  const S = sun(0, world.t), d = S.decl, cx = 75, cy = 75, R = 44, ring = 60;
+  ctx.fillStyle = 'rgba(13,14,18,0.75)';
+  ctx.beginPath(); ctx.arc(cx, cy, ring + 10, 0, Math.PI * 2); ctx.fill();
+
+  // year ring: northern seasons by quarter, marker at today
+  const seasons = [['spring', '#8fd18b'], ['summer', '#e8c35a'], ['autumn', '#e8955a'], ['winter', '#9fc3e8']];
+  seasons.forEach(([, col], q) => {
+    ctx.strokeStyle = col; ctx.lineWidth = 4;
+    ctx.beginPath(); ctx.arc(cx, cy, ring, -Math.PI / 2 + q * Math.PI / 2 + 0.04, -Math.PI / 2 + (q + 1) * Math.PI / 2 - 0.04); ctx.stroke();
+  });
+  const ang = -Math.PI / 2 + S.phase * Math.PI * 2;
+  ctx.fillStyle = '#fff';
+  ctx.beginPath(); ctx.arc(cx + Math.cos(ang) * ring, cy + Math.sin(ang) * ring, 4, 0, Math.PI * 2); ctx.fill();
+
+  // globe: night side, then the lit half facing the sun (to the left, raised by the declination)
+  ctx.save();
+  ctx.beginPath(); ctx.arc(cx, cy, R, 0, Math.PI * 2); ctx.clip();
+  ctx.fillStyle = '#1b2230'; ctx.fillRect(cx - R, cy - R, 2 * R, 2 * R);
+  ctx.fillStyle = '#3d6a8a';
+  ctx.beginPath(); ctx.arc(cx, cy, R, Math.PI / 2 + d, Math.PI * 1.5 + d, false); ctx.fill();
+  // the band of latitudes this world covers
+  const yOf = (lat) => cy - R * Math.sin(lat * Math.PI / 180);
+  const [n, s] = world.latBand || [world.latitude + 1.5, world.latitude - 1.5];
+  ctx.fillStyle = 'rgba(127,209,139,0.22)';
+  ctx.fillRect(cx - R, Math.min(yOf(n), yOf(s)), 2 * R, Math.max(2, Math.abs(yOf(s) - yOf(n))));
+  ctx.strokeStyle = '#7fd18b'; ctx.lineWidth = 1.5;
+  for (const lat of [n, s]) { ctx.beginPath(); ctx.moveTo(cx - R, yOf(lat)); ctx.lineTo(cx + R, yOf(lat)); ctx.stroke(); }
+  ctx.strokeStyle = 'rgba(255,255,255,0.25)'; ctx.lineWidth = 0.75; ctx.setLineDash([2, 2]);
+  ctx.beginPath(); ctx.moveTo(cx - R, cy); ctx.lineTo(cx + R, cy); ctx.stroke();
+  ctx.setLineDash([]);
+  ctx.restore();
+  ctx.strokeStyle = 'rgba(255,255,255,0.35)'; ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.arc(cx, cy, R, 0, Math.PI * 2); ctx.stroke();
+  ctx.fillStyle = '#e8c35a';
+  ctx.beginPath(); ctx.arc(cx - ring - 2, cy - Math.tan(d) * (ring + 2), 3.5, 0, Math.PI * 2); ctx.fill();
+
+  // season text per hemisphere covered
+  ctx.font = '11px ui-monospace, monospace'; ctx.textAlign = 'center'; ctx.fillStyle = '#d8dbe2';
+  const north = sun(45, world.t).season, south = sun(-45, world.t).season;
+  const hi = Math.max(n, s), lo = Math.min(n, s);
+  const text = hi > 0 && lo < 0 ? `N ${north} · S ${south}` : hi > 0 ? `${north} (north)` : `${south} (south)`;
+  ctx.fillText(text, cx, 160);
+}
+
 function drawStats() {
   const s = world.stats, A = world.agents;
   let gen = 0, maxGen = 0;
@@ -259,6 +318,11 @@ function drawStats() {
     items.push(['plants', L.length], ['tree h avg', (h / np).toFixed(2)], ['tree h max', hmax.toFixed(1)],
       ['bark avg', (bark / np).toFixed(2)], ['wings avg', (wings / na).toFixed(3)], ['can fly', fly],
       ['off ground', Math.round((100 * air) / na) + '%'], ['plant eaten', s.meat + s.plant ? Math.round(100 * s.plant / (s.meat + s.plant)) + '%' : '–']);
+    let dormant = 0, evergreen = 0, torpid = 0, hib = 0;
+    for (const p of L) { if (p.dormant) dormant++; if (p.dormancy < 0.02) evergreen++; }
+    for (const a of A) { if (a.torpid) torpid++; if (a.traits.hibernate >= 0) hib++; }
+    items.push(['dormant', Math.round((100 * dormant) / np) + '%'], ['evergreen', Math.round((100 * evergreen) / np) + '%'],
+      ['hibernating', torpid], ['can hibernate', Math.round((100 * hib) / na) + '%']);
   }
   $('stats').innerHTML = items.map(([k, v]) => `<div><span>${k}</span> ${v}</div>`).join('');
 }
@@ -377,9 +441,10 @@ function loop() {
   renderer.renderMain(world, cam, selected());
   const s = selected();
   const sunInfo = world.gravity ? (() => {
-    const S = sun(world.latitude, world.t);
-    return ` · ${S.season} · sun ${Math.max(0, S.elev * 180 / Math.PI).toFixed(0)}° · light ${S.light.toFixed(2)}`;
+    const S = world.sunAt(cam.target[2]), lat = world.latAt(cam.target[2]);
+    return ` · ${world.latBand ? `at ${fmtLat(Math.round(lat))}: ` : ''}${S.season} · sun ${Math.max(0, S.elev * 180 / Math.PI).toFixed(0)}° · light ${S.light.toFixed(2)}`;
   })() : '';
+  if (world.gravity && frame % 3 === 0) drawSeason();
   $('hud').innerHTML = `<b>Polyworld</b> · ${world.size}² · step ${world.t}${sunInfo} · ${world.agents.length} agents · ${world.food.length} food`
     + (s ? ` · following #${s.id}` : '') + (paused ? ' · <b>paused</b>' : '');
   if (frame % 6 === 0) { drawStats(); drawCharts(); }
@@ -395,8 +460,10 @@ try {
   if (sz && [...$('worldSize').options].some((o) => o.value === sz)) $('worldSize').value = sz;
   const dm = localStorage.getItem('pw.dims');
   if (dm === '2' || dm === '3' || dm === 'g') $('dims').value = dm;
-  const lt = localStorage.getItem('pw.lat');
-  if (lt !== null && !isNaN(+lt)) $('lat').value = lt;
+  const lt = JSON.parse(localStorage.getItem('pw.lat') || 'null');
+  if (lt && typeof lt === 'object') {
+    $('lat').value = lt.lat; $('latN').value = lt.n; $('latS').value = lt.s; $('round').checked = !!lt.round;
+  }
 } catch {}
 newWorld();
 requestAnimationFrame(loop);

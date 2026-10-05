@@ -80,6 +80,11 @@ pixel-identical to before; 3D vision matches an independent per-agent render on
   lift signal is a jump. A *wings* gene, decoded cubed so it starts rare, turns
   lift into flapping thrust; with enough wing, an agent can beat gravity and
   fly. Wings cost energy every step, flapping more, and each jump has a cost.
+  The air thins with height, so lift fades to nothing at 20 units. Each flier
+  has a cruising height where lift balances gravity: just above the tallest
+  trees (14) with full wings and full lift, lower with less. The lift output
+  therefore acts as an altitude control. Before this, fliers with a saturated
+  output shot up to the invisible sky ceiling and starved there.
 - **Plants evolve.** Each plant has its own genome:
   - how it splits surplus energy between height, leaves, seeds and a winter
     reserve;
@@ -104,6 +109,31 @@ pixel-identical to before; 3D vision matches an independent per-agent render on
   appear), noon sun elevation (shadow length), and the season shown in the HUD.
   The main view is lit from the sun, with the sky brightening and darkening
   through the year.
+
+- **Hibernation and dormancy.**
+  - **Animals:** a *hibernate* gene sets the local daylight below which an
+    agent goes torpid. About 30% of random genomes never hibernate. A torpid
+    agent lies on the ground at 10% of its running costs and ages at half
+    speed. It can't eat, move or mate, but it can still be attacked.
+  - **Plants:** a *dormancy* gene sets the daylight below which a plant goes
+    dormant. Going dormant pulls half its leaf matter back into the reserve;
+    the plant then idles at 15% maintenance and leafs out from the reserve
+    when the light returns. A threshold of 0 makes an evergreen.
+  - **Seeds** wait for warmth before sprouting and keep through the cold.
+- **Round world.** The *round world* option makes latitude vary from a
+  north-edge latitude (top of the map) to a south-edge latitude. Every plant,
+  seed and agent then gets its own sun, and hemispheres have opposite seasons.
+  East and west don't wrap around.
+- **Seasons you can see.**
+  - **In the world:** snow covers the ground wherever it's locally cold.
+    Temperature lags the sun by about 45 days, so snow lingers into spring.
+    Leaves turn autumn colours before dropping, dormant trees stand bare, and
+    hibernating agents are dimmed and bluish. Light and shadows come from each
+    spot's own sun, so polar night is dark. Agents can see the snow, which
+    gives them a visual cue to the season.
+  - **The season dial** (top right) shows the globe side-on, lit by a sun
+    tilted with the season, the band of latitudes the world covers, a year
+    ring with the current date, and the season in each hemisphere covered.
 
 What happened in 60k-step runs on the patches layout (results vary from run to
 run):

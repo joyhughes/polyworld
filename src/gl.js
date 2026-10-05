@@ -29,13 +29,27 @@ layout(location=2) in vec4 iA;   // x, z, yaw, front-face brightness
 layout(location=3) in vec4 iS;   // scale xyz, red
 layout(location=4) in vec4 iC;   // green, blue, centre y, pitch
 uniform mat4 uVP;
+uniform vec3 uSun;     // fixed light when there is no sun model
+uniform float uGrav;   // 1 in gravity worlds: light from the local sun at each latitude
+uniform vec4 uLat;     // north-edge latitude, south-edge latitude, declination (radians), world size
 out vec3 vC;
 out vec3 vN;
+out vec3 vL;
+out float vDay;
 ${PLACE}
 void main() {
   vec3 w = rot((aPos - vec3(0.0, 0.5, 0.0)) * iS.xyz, iA.z, iC.w) + vec3(iA.x, iC.z, iA.y);
   vN = rot(aNrm, iA.z, iC.w);
   vC = vec3(iS.w, iC.x, iC.y) * (aNrm.x > 0.5 ? iA.w : 1.0);
+  vL = uSun;
+  vDay = 1.0;
+  if (uGrav > 0.5) {
+    float phi = mix(uLat.x, uLat.y, clamp(w.z / uLat.w, 0.0, 1.0)), decl = uLat.z;
+    float e = max(0.05, 1.5707963 - abs(phi - decl));
+    vL = vec3(0.0, sin(e), (phi >= decl ? 1.0 : -1.0) * cos(e));
+    float h0 = acos(clamp(-tan(phi) * tan(decl), -1.0, 1.0));
+    vDay = clamp(h0 * sin(phi) * sin(decl) + cos(phi) * cos(decl) * sin(h0), 0.0, 1.0);
+  }
   gl_Position = uVP * vec4(w, 1.0);
 }`;
 
@@ -43,11 +57,13 @@ const FS = `#version 300 es
 precision mediump float;
 in vec3 vC;
 in vec3 vN;
+in vec3 vL;
+in float vDay;
 uniform float uLit;
-uniform vec3 uSun;
 out vec4 o;
 void main() {
-  float d = 0.45 + 0.55 * max(dot(normalize(vN), uSun), 0.0);
+  float d = 0.45 + 0.55 * max(dot(normalize(vN), vL), 0.0);
+  d *= 0.3 + 0.7 * vDay;   // polar night is dark
   o = vec4(vC * mix(1.0, d, uLit), 1.0);
 }`;
 
@@ -194,8 +210,9 @@ function rec(d, i, x, z, yaw, front, sx, sy, sz, r, g, b, cy, pitch) {
 }
 
 function agentRec(d, i, a, dims) {
-  const [r, g, b] = a.color();
-  rec(d, i, a.x, a.z, a.yaw, 0.25 + 0.75 * a.out[OUT.light], a.len, a.hgt, a.wid, r, g, b,
+  let [r, g, b] = a.color();
+  if (a.torpid) { r = 0.3 * r + 0.08; g *= 0.3; b = 0.3 * b + 0.12; }   // hibernating: dim and bluish
+  rec(d, i, a.x, a.z, a.yaw, a.torpid ? 0.2 : 0.25 + 0.75 * a.out[OUT.light], a.len, a.hgt, a.wid, r, g, b,
     dims === 3 ? a.y : a.hgt / 2, a.pitch);
 }
 
@@ -214,10 +231,27 @@ function barrierRec(d, i, b, world) {
     Math.hypot(dx, dz) + b.thick, h, b.thick, 0.55, 0.55, 0.6, h / 2, 0);
 }
 
-function groundRec(d, i, world) {
+// Ground. In gravity worlds it is a stack of east-west strips, each white with
+// snow in proportion to how cold it is there (temperature lags the sun).
+export const GROUND_STRIPS = 32;
+export function snowAt(world, z) {
+  return Math.min(1, Math.max(0, (0.42 - world.sunAt(z).temp) / 0.25));
+}
+function groundCount(world) {
+  return world.gravity ? GROUND_STRIPS : 1;
+}
+function groundRecs(d, i, world) {
   const S = world.size;
-  if (world.gravity) rec(d, i, S / 2, S / 2, 0, 1, S, 0.02, S, 0.14, 0.12, 0.09, 0.01, 0);
-  else rec(d, i, S / 2, S / 2, 0, 1, S, 0.02, S, 0.11, 0.11, 0.13, 0.01, 0);
+  if (!world.gravity) {
+    rec(d, i, S / 2, S / 2, 0, 1, S, 0.02, S, 0.11, 0.11, 0.13, 0.01, 0);
+    return 1;
+  }
+  const h = S / GROUND_STRIPS;
+  for (let k = 0; k < GROUND_STRIPS; k++) {
+    const z = (k + 0.5) * h, s = snowAt(world, z);
+    rec(d, i + k, S / 2, z, 0, 1, S, 0.02, h, 0.14 + 0.68 * s, 0.12 + 0.72 * s, 0.09 + 0.79 * s, 0.01, 0);
+  }
+  return GROUND_STRIPS;
 }
 
 // A plant is a trunk (once it has one) under a canopy box. Trunks shade from
@@ -233,7 +267,14 @@ function plantRecs(d, i, p) {
     rec(d, i + n++, p.x, p.z, 0, 1, tw, bottom, tw,
       0.3 + 0.15 * b, 0.5 - 0.22 * b, 0.18 - 0.06 * b, bottom / 2, 0);
   }
-  rec(d, i + n++, p.x, p.z, p.id, 1, 2 * cr, cd, 2 * cr, 0.12, 0.62, 0.16, bottom + cd / 2, 0);
+  // leaves turn as daylight nears the plant's dormancy threshold; dormant plants are bare
+  let r = 0.12, g = 0.62, b = 0.16;
+  if (p.dormant) { r = 0.34; g = 0.28; b = 0.22; }
+  else if (p.dormancy > 0 && p.light !== undefined) {
+    const s = Math.min(1, Math.max(0, (p.dormancy + 0.15 - p.light) / 0.15));
+    r += (0.85 - r) * s; g += (0.42 - g) * s; b += (0.08 - b) * s;
+  }
+  rec(d, i + n++, p.x, p.z, p.id, 1, 2 * cr, cd, 2 * cr, r, g, b, bottom + cd / 2, 0);
   return n;
 }
 
@@ -268,6 +309,8 @@ export class Renderer {
     this.uVP = gl.getUniformLocation(prog, 'uVP');
     this.uLit = gl.getUniformLocation(prog, 'uLit');
     this.uSun = gl.getUniformLocation(prog, 'uSun');
+    this.uGrav = gl.getUniformLocation(prog, 'uGrav');
+    this.uLat = gl.getUniformLocation(prog, 'uLat');
 
     this.vao = gl.createVertexArray();
     gl.bindVertexArray(this.vao);
@@ -352,7 +395,7 @@ export class Renderer {
   // Fill the instance buffer for the main view.
   writeInstances(world, selected) {
     const dims = world.dims, plants = world.plants ? world.plants.list : [];
-    const shadows = dims === 3 ? world.agents.length + world.food.length + plants.length : 0;
+    const shadows = dims === 3 ? world.agents.length + world.food.length + plants.length + GROUND_STRIPS : 0;
     const need = (world.agents.length + world.food.length + world.barriers.length + world.patches.length
       + 2 * plants.length + shadows + 24) * REC;
     if (need > this.inst.length) this.inst = new Float32Array(need * 2);
@@ -362,7 +405,7 @@ export class Renderer {
     for (const f of world.food) foodRec(d, n++, f, dims, world.gravity);
     for (const p of plants) n += plantRecs(d, n, p);
     for (const b of world.barriers) barrierRec(d, n++, b, world);
-    groundRec(d, n++, world);
+    n += groundRecs(d, n, world);
     const S = world.size;
     for (const p of world.patches) {
       const [x0, z0, x1, z1] = p.rect;
@@ -371,14 +414,19 @@ export class Renderer {
     }
     if (world.gravity) {
       // shadows fall away from the sun and lengthen as it gets lower
-      const S = this.sunNow, tanE = Math.tan(Math.max(0.08, S.elev)), str = Math.min(3, 1 / Math.sin(Math.max(0.2, S.elev)));
-      const off = (h) => -S.dirZ * Math.min(40, h / tanE);
+      // (each from its own latitude's sun)
+      const shade = (z) => {
+        const S = world.sunAt(z), e = Math.max(0.08, S.elev);
+        return { dz: -S.dirZ / Math.tan(e), str: Math.min(3, 1 / Math.sin(Math.max(0.2, e))), snow: snowAt(world, z) };
+      };
       for (const p of plants) {
-        const cr = canopyRadius(p), mid = p.h - Math.min(p.h, canopyDepth(cr)) / 2;
-        rec(d, n++, p.x, p.z + off(mid), 0, 1, 2 * cr, 0.01, 2 * cr * str, 0.06, 0.06, 0.045, 0.03, 0);
+        const cr = canopyRadius(p), mid = p.h - Math.min(p.h, canopyDepth(cr)) / 2, s = shade(p.z);
+        const k = 0.06 + 0.4 * s.snow; // shadows on snow are lighter
+        rec(d, n++, p.x, p.z + Math.max(-40, Math.min(40, s.dz * mid)), 0, 1, 2 * cr, 0.01, 2 * cr * s.str, k, k, k * 0.8 + 0.05 * s.snow, 0.03, 0);
       }
       for (const a of world.agents) {
-        rec(d, n++, a.x, a.z + off(a.y), a.yaw, 1, a.len, 0.01, a.wid, 0.05, 0.05, 0.04, 0.035, 0);
+        const s = shade(a.z), k = 0.05 + 0.4 * s.snow;
+        rec(d, n++, a.x, a.z + Math.max(-40, Math.min(40, s.dz * a.y)), a.yaw, 1, a.len, 0.01, a.wid, k, k, k, 0.035, 0);
       }
     } else if (dims === 3) {
       // shadows on the floor give depth cues; a wire frame marks the volume
@@ -450,7 +498,7 @@ export class Renderer {
     }
     for (let c = 0; c < ncells; c++) { objCount[c + 1] += objCount[c]; agCount[c + 1] += agCount[c]; }
     const objStart = objCount.slice(), agStart = agCount.slice(); // prefix sums
-    const nGlobal = B.length + (dims === 3 ? 1 : 0);   // seen from everywhere
+    const nGlobal = B.length + (dims === 3 ? groundCount(world) : 0);   // seen from everywhere
     const nObj = nA + F.length + plantRecsTotal + nGlobal;
 
     if (this.objData.length < nObj * REC + 4096 * 4) this.objData = new Float32Array(nObj * REC * 2 + 4096 * 4);
@@ -470,7 +518,7 @@ export class Renderer {
     for (let i = 0; i < PL.length; i++) fill[pCell[i]] += plantRecs(od, fill[pCell[i]], PL[i]);
     const globalStart = nA + F.length + plantRecsTotal;
     B.forEach((b, i) => barrierRec(od, globalStart + i, b, world));
-    if (dims === 3) groundRec(od, globalStart + B.length, world);
+    if (dims === 3) groundRecs(od, globalStart + B.length, world);
     this.uploadData(this.objTex, od, nObj * 3, 0);
     this.uploadData(this.eyeTex, ed, nA * 3, 1);
 
@@ -537,7 +585,8 @@ export class Renderer {
     const dpr = Math.min(2, window.devicePixelRatio || 1);
     const w = Math.round(cv.clientWidth * dpr), h = Math.round(cv.clientHeight * dpr);
     if (cv.width !== w || cv.height !== h) { cv.width = w; cv.height = h; }
-    this.sunNow = world.gravity ? sun(world.latitude, world.t) : null;
+    // sky colour from the sun where the camera is looking
+    this.sunNow = world.gravity ? world.sunAt(cam.target[2]) : null;
     const count = this.writeInstances(world, cam.mode === 'eye' ? null : selected);
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
     gl.viewport(0, 0, w, h);
@@ -551,12 +600,12 @@ export class Renderer {
     gl.useProgram(this.prog);
     gl.bindVertexArray(this.vao);
     const aspect = w / h;
-    if (this.sunNow) {
-      const e = Math.max(0.05, this.sunNow.elev);
-      gl.uniform3f(this.uSun, 0, Math.sin(e), this.sunNow.dirZ * Math.cos(e));
-    } else {
-      const k = 1 / Math.hypot(0.4, 1, 0.25);
-      gl.uniform3f(this.uSun, 0.4 * k, k, 0.25 * k);
+    const k = 1 / Math.hypot(0.4, 1, 0.25);
+    gl.uniform3f(this.uSun, 0.4 * k, k, 0.25 * k);
+    gl.uniform1f(this.uGrav, world.gravity ? 1 : 0);
+    if (world.gravity) {
+      const [n, s] = world.latBand || [world.latitude, world.latitude];
+      gl.uniform4f(this.uLat, n * Math.PI / 180, s * Math.PI / 180, this.sunNow.decl, world.size);
     }
 
     let eye, centre, up = [0, 1, 0], fovy = 50 * Math.PI / 180;

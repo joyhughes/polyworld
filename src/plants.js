@@ -8,19 +8,28 @@
 // a plant dies when its reserve is gone. Agents graze leaves they can reach
 // and unprotected stems; bark makes stems inedible at a construction cost.
 // Seeds fall to the ground as fruit that agents can eat before it sprouts.
+// Plants can go dormant: below a genetic daylight threshold they resorb their
+// leaves into the reserve and idle on low maintenance until spring.
 
 import { P } from './params.js';
 
 const DEG = Math.PI / 180;
 
 // genes, all in [0,1]
-export const PG = { height: 0, leaf: 1, seed: 2, store: 3, bark: 4, seedSize: 5, dispersal: 6 };
-const N_GENES = 7;
+export const PG = { height: 0, leaf: 1, seed: 2, store: 3, bark: 4, seedSize: 5, dispersal: 6, dormancy: 7 };
+const N_GENES = 8;
 
 // Sun at a latitude (degrees) and time (steps). Light is the daily mean
 // insolation relative to the equator at equinox; elev is the noon elevation;
-// dirZ is +1 when the noon sun is to the south (+z), -1 when to the north.
+// dirZ is +1 when the noon sun is to the south (+z), -1 when to the north;
+// temp is a cold/warm proxy: the light of P.plants.seasonLag steps ago.
 export function sun(latitude, t) {
+  const s = sunNow(latitude, t);
+  s.temp = sunNow(latitude, t - P.plants.seasonLag).light;
+  return s;
+}
+
+function sunNow(latitude, t) {
   const phase = (t / P.plants.yearLength) % 1;
   const decl = 23.44 * DEG * Math.sin(2 * Math.PI * phase);
   const phi = latitude * DEG;
@@ -53,6 +62,7 @@ function decodePlant(g) {
     bark: g[PG.bark],
     seedSize: 2 + 10 * g[PG.seedSize],
     dispersal: g[PG.dispersal],
+    dormancy: 0.6 * g[PG.dormancy] ** 2, // daylight below which the plant goes dormant; 0 = evergreen
   };
 }
 
@@ -124,14 +134,13 @@ export class Plants {
 
   // Advance all plants by `dt` steps.
   update(dt) {
-    const W = this.world, S = sun(W.latitude, W.t), C = P.plants, rng = W.rng;
-    this.light = S.light;
+    const W = this.world, C = P.plants, rng = W.rng;
     this.buildGrid();
 
-    // shading: taller neighbours whose shadow, cast away from the sun, overlaps this canopy
-    const tanE = Math.tan(Math.max(5 * DEG, S.elev));
+    // shading: taller neighbours whose shadow, cast away from the local sun, overlaps this canopy
     const n = this.n;
     for (const p of this.list) {
+      const S = W.sunAt(p.z), tanE = Math.tan(Math.max(5 * DEG, S.elev));
       const cr = canopyRadius(p);
       const cx = Math.floor(p.x / 5), cz = Math.floor(p.z / 5);
       let lit = 1;
@@ -140,7 +149,7 @@ export class Plants {
         for (let i = cx - 2; i <= cx + 2; i++) {
           if (i < 0 || i >= n) continue;
           for (const q of this.cells[j * n + i]) {
-            if (q === p || q.h <= p.h) continue;
+            if (q === p || q.h <= p.h || q.dormant) continue;
             const off = Math.min(12, (q.h - p.h) / tanE);
             const sx = q.x, sz = q.z - S.dirZ * off;
             const crq = canopyRadius(q);
@@ -157,6 +166,24 @@ export class Plants {
     const births = [];
     for (const p of this.list) {
       p.age += dt;
+      const S = W.sunAt(p.z);
+      p.light = S.light;
+      // dormancy with a little hysteresis; going dormant resorbs half the leaf matter
+      if (!p.dormant && S.light < p.dormancy) {
+        p.dormant = true;
+        p.reserve += (p.L - C.minLeaf) * C.resorb;
+        p.L = C.minLeaf;
+      } else if (p.dormant && S.light > p.dormancy + 0.05) {
+        p.dormant = false;
+        const flush = p.reserve * C.springFlush;
+        p.reserve -= flush;
+        p.L += flush;
+      }
+      if (p.dormant) {
+        p.reserve -= (C.baseCost + C.heightCost * p.h * 0.36) * C.dormantCost * dt;
+        if (p.reserve < 0 || p.age > p.maxAge) p.dead = true;
+        continue;
+      }
       const cr = canopyRadius(p);
       const photo = C.photo * S.light * p.fert * Math.PI * cr * cr * (1 - p.shade);
       const maint = C.baseCost + C.leafCost * p.L + C.heightCost * p.h * cr;

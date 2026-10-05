@@ -10,6 +10,7 @@
     --accent: #7fd18b; --red: #e86a5a; --blue: #5a8de8;
   }
   * { box-sizing: border-box; }
+  [hidden] { display: none !important; }
   html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
     font: 12px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; }
   #app { display: flex; height: 100%; }
@@ -63,6 +64,8 @@
   <div id="view">
     <canvas id="gl"></canvas>
     <div id="hud"></div>
+    <canvas id="season" width="300" height="340" hidden
+      style="position:absolute;right:10px;top:8px;width:150px;height:170px;pointer-events:none"></canvas>
     <div id="help">drag: orbit · right/shift-drag: pan · wheel: zoom · click: select · space: pause · F: follow · E: agent's eye · N: fittest · B: brain</div>
     <div id="brainView" hidden>
       <div class="bv-head">
@@ -103,9 +106,18 @@
       </select>
       <button id="reset">New world</button>
     </div>
-    <div class="row" id="latRow" hidden>
-      <label>latitude <input id="lat" type="range" min="-90" max="90" value="45"></label>
-      <span id="latVal" class="muted"></span>
+    <div id="latRow" hidden>
+      <div class="row"><label><input type="checkbox" id="round"> round world: latitude varies north to south</label></div>
+      <div class="row" id="latSingle">
+        <label>latitude <input id="lat" type="range" min="-90" max="90" value="45"></label>
+        <span id="latVal" class="muted"></span>
+      </div>
+      <div id="latBand" hidden>
+        <div class="row"><label>north edge <input id="latN" type="range" min="-90" max="90" value="70"></label>
+          <span id="latNVal" class="muted"></span></div>
+        <div class="row"><label>south edge <input id="latS" type="range" min="-90" max="90" value="-20"></label>
+          <span id="latSVal" class="muted"></span></div>
+      </div>
     </div>
     <div class="row">
       <button id="camOrbit" class="on">Orbit</button>

@@ -4,7 +4,9 @@ import { P, WORLDS } from './params.js';
 import { makeRng } from './rng.js';
 import { GENE, N_OUT, decode, randomGenome, mutate, crossover } from './genome.js';
 import { Brain, OUT } from './brain.js';
-import { Plants } from './plants.js';
+import { Plants, sun } from './plants.js';
+
+const SUN_BANDS = 64; // latitude bands the sun is computed for each step
 
 const DEG = Math.PI / 180;
 const CELL = 5;
@@ -51,6 +53,7 @@ export class Agent {
   // and internal state into the input neurons, then step. Each vision neuron
   // averages one colour channel over its cell of a cols x rows grid.
   think(pixels, i, rw, rh, rng) {
+    if (this.torpid) return;
     const b = this.brain, s = b.state, base = i * rw * rh * 4;
     s[0] = rng();
     s[1] = this.energy / this.maxEnergy;
@@ -75,6 +78,7 @@ export class Agent {
 
   act(world) {
     const o = this.out, t = this.traits, c = P.cost;
+    if (world.gravity && this.hibernation(world)) return;
     const turn = (o[OUT.yaw] - 0.5) * 2;
     this.yaw += turn * P.maxTurn;
     this.speed = o[OUT.speed] * t.maxSpeed;
@@ -91,7 +95,8 @@ export class Agent {
         if (lift > G.jumpThreshold) { this.vy = G.jump; extra += c.jump * this.size; this.jumps++; }
       }
       if (!grounded || this.vy > 0) {
-        this.vy = (this.vy - G.g + lift * wings * G.maxLift) * G.drag;
+        const thin = Math.max(0, 1 - (this.y / G.airHeight) ** 2);
+        this.vy = (this.vy - G.g + lift * wings * G.maxLift * thin) * G.drag;
         extra += c.flap * lift * wings * this.size;
       }
       this.y += this.vy;
@@ -136,6 +141,30 @@ export class Agent {
     if (this.mateWait > 0) this.mateWait--;
   }
 
+  // Enter or leave torpor by local daylight. While torpid the agent lies on the
+  // ground, runs at a fraction of its normal costs and ages slowly. Returns
+  // true if torpid this step.
+  hibernation(world) {
+    const thr = this.traits.hibernate, H = P.hibernate;
+    if (thr < 0) return false;
+    const light = world.sunAt(this.z).light;
+    if (!this.torpid && light < thr) {
+      this.torpid = true;
+      this.speed = 0;
+      this.vy = 0;
+      this.y = this.r;
+      this.out[OUT.eat] = this.out[OUT.mate] = this.out[OUT.fight] = 0;
+    } else if (this.torpid && light > thr + H.wakeMargin) {
+      this.torpid = false;
+    }
+    if (!this.torpid) return false;
+    const b = this.brain, c = P.cost;
+    this.energy -= (c.base * this.size + c.neuron * b.numNeurons + c.synapse * b.numSynapses
+      + c.wings * this.traits.wings * this.size) * H.metabolism;
+    this.age += H.ageRate;
+    return true;
+  }
+
   fitness() {
     const f = P.fit;
     return f.eat * this.eaten / this.maxEnergy
@@ -162,6 +191,8 @@ export class World {
     this.gravity = gravity && dims === 3;
     this.dims = dims;
     this.latitude = P.gravity.latitude;
+    this.latBand = null;   // [north edge, south edge] for a round world; null = one latitude
+    this.sunCache = { t: -1, bands: [] };
     const k = size / 100, area = k * k;
     this.height = this.gravity ? P.gravity.height * k : dims === 3 ? P.volumeHeight * k : 0;
     const volume = dims === 3 && !this.gravity;
@@ -202,6 +233,28 @@ export class World {
       }
     }
     for (let i = 0; i < Math.round(P.initAgents * area * agentScale); i++) this.agents.push(this.makeGAAgent(true));
+  }
+
+  // --- latitude and sun ------------------------------------------------------
+
+  // Latitude at a north-south position: north edge at z = 0, south edge at z = size.
+  latAt(z) {
+    if (!this.latBand) return this.latitude;
+    const [n, s] = this.latBand;
+    return n + (s - n) * Math.min(1, Math.max(0, z / this.size));
+  }
+
+  // The sun where z is, from a per-step table of latitude bands.
+  sunAt(z) {
+    const C = this.sunCache;
+    if (C.t !== this.t || C.lat !== this.latitude || C.band !== this.latBand) {
+      C.t = this.t; C.lat = this.latitude; C.band = this.latBand;
+      const nb = this.latBand ? SUN_BANDS : 1;
+      C.bands = [];
+      for (let k = 0; k < nb; k++) C.bands.push(sun(this.latAt(((k + 0.5) / nb) * this.size), this.t));
+    }
+    const nb = C.bands.length;
+    return C.bands[Math.min(nb - 1, Math.max(0, Math.floor((z / this.size) * nb)))];
   }
 
   // --- geometry -----------------------------------------------------------
@@ -329,6 +382,7 @@ export class World {
     const n = this.ncell, inv = 1 / CELL, vol = this.dims === 3;
     for (const a of this.agents) {
       const cx = Math.floor(a.x * inv), cz = Math.floor(a.z * inv);
+      if (a.torpid) continue;
       const eat = a.out[OUT.eat], fight = a.out[OUT.fight], mate = a.out[OUT.mate];
       if (this.plants && eat > P.eatThreshold) {
         // plants share the 5-unit grid
@@ -376,7 +430,7 @@ export class World {
               if (!this.blocked(a.x - px, a.z - pz, a.r)) { a.x -= px; a.z -= pz; }
               if (!this.blocked(b.x + px, b.z + pz, b.r)) { b.x += px; b.z += pz; }
 
-              if (mate > P.mateThreshold && b.out[OUT.mate] > P.mateThreshold
+              if (!b.torpid && mate > P.mateThreshold && b.out[OUT.mate] > P.mateThreshold
                 && a.mateWait === 0 && b.mateWait === 0
                 && this.agents.length + births.length < this.maxAgents) {
                 this.mate(a, b, births);
@@ -426,9 +480,13 @@ export class World {
 
     // seeds sprout into plants, or rot
     if (this.plants) {
+      const C = P.plants;
       for (const f of this.food) {
         if (f.patch !== -2 || f.energy <= 0.5) continue;
-        if (this.t >= f.germinate && this.plants.add(f.g, f.x, f.z, f.seedEnergy, f.generation)) f.energy = 0;
+        const light = this.sunAt(f.z).light;
+        if (light < C.coldLight) { f.rot++; continue; }       // seeds keep in the cold
+        if (this.t >= f.germinate && light >= C.sproutLight
+          && this.plants.add(f.g, f.x, f.z, f.seedEnergy, f.generation)) f.energy = 0;
         else if (this.t >= f.rot) f.energy = 0;
       }
     }
@@ -465,11 +523,12 @@ export class World {
 
   plantStats() {
     const L = this.plants.list, A = this.agents;
-    let h = 0, hmax = 0, bark = 0, wings = 0, air = 0;
-    for (const p of L) { h += p.h; hmax = Math.max(hmax, p.h); bark += p.bark; }
-    for (const a of A) { wings += a.traits.wings; if (a.y > a.r + 0.3) air++; }
+    let h = 0, hmax = 0, bark = 0, wings = 0, air = 0, dormant = 0, torpid = 0;
+    for (const p of L) { h += p.h; hmax = Math.max(hmax, p.h); bark += p.bark; if (p.dormant) dormant++; }
+    for (const a of A) { wings += a.traits.wings; if (a.y > a.r + 0.3) air++; if (a.torpid) torpid++; }
     const np = L.length || 1, na = A.length || 1;
-    return { plants: L.length, treeH: h / np, treeMax: hmax, bark: bark / np, wings: wings / na, airborne: air / na };
+    return { plants: L.length, treeH: h / np, treeMax: hmax, bark: bark / np, wings: wings / na, airborne: air / na,
+      dormant: dormant / np, torpid: torpid / na };
   }
 
   sample() {

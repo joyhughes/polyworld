@@ -34,6 +34,7 @@ gene('greenN');
 gene('blueN');
 gene('visionRows'); // 3D only: retina rows each colour channel is split into
 gene('wings');      // gravity only: flight muscle; decoded cubed so it starts rare
+gene('hibernate');  // gravity only: daylight below which the agent goes torpid
 gene('numInternal');
 gene('exc', MAX_INTERNAL);
 gene('inh', MAX_INTERNAL);
@@ -69,6 +70,8 @@ export function decode(g) {
     nBlue: irange(1, MAX_VISION, g[G.blueN]),
     visionRows: irange(1, 4, g[G.visionRows]),
     wings: g[G.wings] ** 3,
+    // below 0.3 the agent never hibernates (-1); above, the daylight threshold is 0-0.6
+    hibernate: g[G.hibernate] < 0.3 ? -1 : ((g[G.hibernate] - 0.3) / 0.7) * 0.6,
     numInternal: irange(1, MAX_INTERNAL, g[G.numInternal]),
     exc,
     inh,
