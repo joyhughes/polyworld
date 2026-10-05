@@ -7,6 +7,7 @@
 import { P } from './params.js';
 import { World } from './world.js';
 import { OUT } from './brain.js';
+import { canopyRadius, canopyDepth, trunkWidth, sun } from './plants.js';
 
 // Object record, shared by the instance buffer and the vision object texture:
 // (x, z, yaw, front) (sx, sy, sz, r) (g, b, centreY, pitch)
@@ -43,10 +44,10 @@ precision mediump float;
 in vec3 vC;
 in vec3 vN;
 uniform float uLit;
+uniform vec3 uSun;
 out vec4 o;
 void main() {
-  vec3 L = normalize(vec3(0.4, 1.0, 0.25));
-  float d = 0.45 + 0.55 * max(dot(normalize(vN), L), 0.0);
+  float d = 0.45 + 0.55 * max(dot(normalize(vN), uSun), 0.0);
   o = vec4(vC * mix(1.0, d, uLit), 1.0);
 }`;
 
@@ -198,9 +199,11 @@ function agentRec(d, i, a, dims) {
     dims === 3 ? a.y : a.hgt / 2, a.pitch);
 }
 
-function foodRec(d, i, f, dims) {
+function foodRec(d, i, f, dims, gravity) {
   const h = World.foodHalf(f) * 2;
-  if (dims === 3) rec(d, i, f.x, f.z, 0, 1, h, h, h, 0.15, 0.85, 0.15, f.y, 0);
+  if (f.patch === -2) rec(d, i, f.x, f.z, 0, 1, h, h, h, 0.95, 0.6, 0.1, h / 2 + 0.02, 0);   // fruit
+  else if (gravity && f.patch === -1) rec(d, i, f.x, f.z, 0, 1, h, 0.4, h, 0.55, 0.12, 0.1, 0.2, 0); // carrion
+  else if (dims === 3) rec(d, i, f.x, f.z, 0, 1, h, h, h, 0.15, 0.85, 0.15, f.y, 0);
   else rec(d, i, f.x, f.z, 0, 1, h, 0.6, h, 0.15, 0.85, 0.15, 0.3, 0);
 }
 
@@ -213,7 +216,25 @@ function barrierRec(d, i, b, world) {
 
 function groundRec(d, i, world) {
   const S = world.size;
-  rec(d, i, S / 2, S / 2, 0, 1, S, 0.02, S, 0.11, 0.11, 0.13, 0.01, 0);
+  if (world.gravity) rec(d, i, S / 2, S / 2, 0, 1, S, 0.02, S, 0.14, 0.12, 0.09, 0.01, 0);
+  else rec(d, i, S / 2, S / 2, 0, 1, S, 0.02, S, 0.11, 0.11, 0.13, 0.01, 0);
+}
+
+// A plant is a trunk (once it has one) under a canopy box. Trunks shade from
+// green stem to brown bark with the bark gene.
+function plantRecCount(p) {
+  return p.h - canopyDepth(canopyRadius(p)) > 0.05 ? 2 : 1;
+}
+function plantRecs(d, i, p) {
+  const cr = canopyRadius(p), cd = Math.min(p.h, canopyDepth(cr)), bottom = p.h - cd;
+  let n = 0;
+  if (bottom > 0.05) {
+    const tw = trunkWidth(p), b = p.bark;
+    rec(d, i + n++, p.x, p.z, 0, 1, tw, bottom, tw,
+      0.3 + 0.15 * b, 0.5 - 0.22 * b, 0.18 - 0.06 * b, bottom / 2, 0);
+  }
+  rec(d, i + n++, p.x, p.z, p.id, 1, 2 * cr, cd, 2 * cr, 0.12, 0.62, 0.16, bottom + cd / 2, 0);
+  return n;
 }
 
 export class Renderer {
@@ -246,6 +267,7 @@ export class Renderer {
     }
     this.uVP = gl.getUniformLocation(prog, 'uVP');
     this.uLit = gl.getUniformLocation(prog, 'uLit');
+    this.uSun = gl.getUniformLocation(prog, 'uSun');
 
     this.vao = gl.createVertexArray();
     gl.bindVertexArray(this.vao);
@@ -329,15 +351,16 @@ export class Renderer {
 
   // Fill the instance buffer for the main view.
   writeInstances(world, selected) {
-    const dims = world.dims;
-    const shadows = dims === 3 ? world.agents.length + world.food.length : 0;
+    const dims = world.dims, plants = world.plants ? world.plants.list : [];
+    const shadows = dims === 3 ? world.agents.length + world.food.length + plants.length : 0;
     const need = (world.agents.length + world.food.length + world.barriers.length + world.patches.length
-      + shadows + 24) * REC;
+      + 2 * plants.length + shadows + 24) * REC;
     if (need > this.inst.length) this.inst = new Float32Array(need * 2);
     const d = this.inst;
     let n = 0;
     for (const a of world.agents) agentRec(d, n++, a, dims);
-    for (const f of world.food) foodRec(d, n++, f, dims);
+    for (const f of world.food) foodRec(d, n++, f, dims, world.gravity);
+    for (const p of plants) n += plantRecs(d, n, p);
     for (const b of world.barriers) barrierRec(d, n++, b, world);
     groundRec(d, n++, world);
     const S = world.size;
@@ -346,7 +369,18 @@ export class Renderer {
       if (x1 - x0 >= S && z1 - z0 >= S) continue;
       rec(d, n++, (x0 + x1) / 2, (z0 + z1) / 2, 0, 1, x1 - x0, 0.03, z1 - z0, 0.12, 0.17, 0.12, 0.015, 0);
     }
-    if (dims === 3) {
+    if (world.gravity) {
+      // shadows fall away from the sun and lengthen as it gets lower
+      const S = this.sunNow, tanE = Math.tan(Math.max(0.08, S.elev)), str = Math.min(3, 1 / Math.sin(Math.max(0.2, S.elev)));
+      const off = (h) => -S.dirZ * Math.min(40, h / tanE);
+      for (const p of plants) {
+        const cr = canopyRadius(p), mid = p.h - Math.min(p.h, canopyDepth(cr)) / 2;
+        rec(d, n++, p.x, p.z + off(mid), 0, 1, 2 * cr, 0.01, 2 * cr * str, 0.06, 0.06, 0.045, 0.03, 0);
+      }
+      for (const a of world.agents) {
+        rec(d, n++, a.x, a.z + off(a.y), a.yaw, 1, a.len, 0.01, a.wid, 0.05, 0.05, 0.04, 0.035, 0);
+      }
+    } else if (dims === 3) {
       // shadows on the floor give depth cues; a wire frame marks the volume
       for (const a of world.agents) rec(d, n++, a.x, a.z, a.yaw, 1, a.len, 0.01, a.wid, 0.04, 0.04, 0.05, 0.04, 0);
       for (const f of world.food) {
@@ -405,13 +439,19 @@ export class Renderer {
     const cellOf = (x, z) => Math.min(nc - 1, Math.max(0, Math.floor(z / cell))) * nc
       + Math.min(nc - 1, Math.max(0, Math.floor(x / cell)));
     const objCount = new Int32Array(ncells + 1), agCount = new Int32Array(ncells + 1);
-    const aCell = new Int32Array(nA), fCell = new Int32Array(F.length);
+    const PL = world.plants ? world.plants.list : [];
+    const aCell = new Int32Array(nA), fCell = new Int32Array(F.length), pCell = new Int32Array(PL.length);
     for (let i = 0; i < nA; i++) { const c = cellOf(A[i].x, A[i].z); aCell[i] = c; objCount[c + 1]++; agCount[c + 1]++; }
     for (let i = 0; i < F.length; i++) { const c = cellOf(F[i].x, F[i].z); fCell[i] = c; objCount[c + 1]++; }
+    let plantRecsTotal = 0;
+    for (let i = 0; i < PL.length; i++) {
+      const c = cellOf(PL[i].x, PL[i].z), k = plantRecCount(PL[i]);
+      pCell[i] = c; objCount[c + 1] += k; plantRecsTotal += k;
+    }
     for (let c = 0; c < ncells; c++) { objCount[c + 1] += objCount[c]; agCount[c + 1] += agCount[c]; }
     const objStart = objCount.slice(), agStart = agCount.slice(); // prefix sums
     const nGlobal = B.length + (dims === 3 ? 1 : 0);   // seen from everywhere
-    const nObj = nA + F.length + nGlobal;
+    const nObj = nA + F.length + plantRecsTotal + nGlobal;
 
     if (this.objData.length < nObj * REC + 4096 * 4) this.objData = new Float32Array(nObj * REC * 2 + 4096 * 4);
     if (this.eyeData.length < nA * 12 + 4096 * 4) this.eyeData = new Float32Array(nA * 24 + 4096 * 4);
@@ -426,8 +466,9 @@ export class Renderer {
       ed[o + 4] = f[0]; ed[o + 5] = f[1]; ed[o + 6] = f[2]; ed[o + 7] = Math.tan(a.fov / 2);
       ed[o + 8] = u[0]; ed[o + 9] = u[1]; ed[o + 10] = u[2]; ed[o + 11] = by;
     }
-    for (let i = 0; i < F.length; i++) foodRec(od, fill[fCell[i]]++, F[i], dims);
-    const globalStart = nA + F.length;
+    for (let i = 0; i < F.length; i++) foodRec(od, fill[fCell[i]]++, F[i], dims, world.gravity);
+    for (let i = 0; i < PL.length; i++) fill[pCell[i]] += plantRecs(od, fill[pCell[i]], PL[i]);
+    const globalStart = nA + F.length + plantRecsTotal;
     B.forEach((b, i) => barrierRec(od, globalStart + i, b, world));
     if (dims === 3) groundRec(od, globalStart + B.length, world);
     this.uploadData(this.objTex, od, nObj * 3, 0);
@@ -496,14 +537,27 @@ export class Renderer {
     const dpr = Math.min(2, window.devicePixelRatio || 1);
     const w = Math.round(cv.clientWidth * dpr), h = Math.round(cv.clientHeight * dpr);
     if (cv.width !== w || cv.height !== h) { cv.width = w; cv.height = h; }
+    this.sunNow = world.gravity ? sun(world.latitude, world.t) : null;
     const count = this.writeInstances(world, cam.mode === 'eye' ? null : selected);
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
     gl.viewport(0, 0, w, h);
-    gl.clearColor(0.03, 0.03, 0.05, 1);
+    if (this.sunNow) {
+      const l = Math.min(1, this.sunNow.light);
+      gl.clearColor(0.03 + 0.05 * l, 0.035 + 0.07 * l, 0.05 + 0.12 * l, 1);
+    } else {
+      gl.clearColor(0.03, 0.03, 0.05, 1);
+    }
     gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
     gl.useProgram(this.prog);
     gl.bindVertexArray(this.vao);
     const aspect = w / h;
+    if (this.sunNow) {
+      const e = Math.max(0.05, this.sunNow.elev);
+      gl.uniform3f(this.uSun, 0, Math.sin(e), this.sunNow.dirZ * Math.cos(e));
+    } else {
+      const k = 1 / Math.hypot(0.4, 1, 0.25);
+      gl.uniform3f(this.uSun, 0.4 * k, k, 0.25 * k);
+    }
 
     let eye, centre, up = [0, 1, 0], fovy = 50 * Math.PI / 180;
     if (cam.mode === 'eye' && selected) {

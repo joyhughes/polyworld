@@ -25,6 +25,42 @@ export const P = {
   volumeFoodScale: 3,     // extra food in volumes, which are sparser to search
   volumeAgentScale: 2,    // more agents in volumes, so mates can find each other
 
+  // gravity worlds: agents crawl, jump, and can evolve flight; plants evolve
+  gravity: {
+    height: 20,           // sky ceiling at world size 100
+    g: 0.012,             // downward acceleration per step
+    jump: 0.22,           // upward speed of a jump
+    jumpThreshold: 0.75,  // lift output needed to jump from the ground
+    maxLift: 0.026,       // upward acceleration at full lift output with full wings
+    drag: 0.97,           // vertical velocity kept per step in the air
+    reach: 0.6,           // how far above its body an agent can graze
+    latitude: 45,         // default; the UI slider changes it live
+  },
+  plants: {
+    yearLength: 6000,     // steps per year (seasons)
+    initPer100: 350,      // starting plants per 100x100
+    maxPer100: 1100,      // plant cap per 100x100
+    baseFertility: 0.55,  // growth multiplier outside the layout's patches (1 inside)
+    photo: 0.012,         // energy per step per unit of sunlit canopy area at full sun
+    baseCost: 0.002,      // maintenance per plant per step, so deep shade is fatal
+    leafCost: 0.0009,     // maintenance per unit leaf per step
+    heightCost: 0.00025,  // maintenance per unit height per unit canopy radius per step
+    buildCost: 1.0,       // energy per unit of height grown
+    barkCost: 1.5,        // bark multiplies height build cost by (1 + bark * this)
+    reserveCap: 6,        // reserve capacity, times (1 + height)
+    minLeaf: 0.1,         // leaves never drop below a bud
+    maxCanopy: 2.6,
+    maxHeight: 14,
+    maxAge: 10000,        // lifespan in steps for bark 0.25; woody plants live longer (see plants.js)
+    shadeOpacity: 0.85,   // fraction of light a fully overlapping canopy blocks
+    mutationRate: 0.3,    // per gene, per seed
+    updateEvery: 5,       // plants advance every this many steps
+    germinateAfter: 300,  // seeds lie on the ground as edible fruit this long before sprouting
+    seedLife: 1500,       // seeds that cannot sprout rot after this long
+    foodScale: 4,         // food cap multiplier in gravity worlds (fruit + carrion)
+    foodValue: 5,         // animal energy per unit of plant matter (leaf, stem or fruit)
+  },
+
   // genetic ranges (genes are 0..1, decoded into these)
   lifespan: [1200, 4000],
   size: [0.7, 1.5],
@@ -53,6 +89,9 @@ export const P = {
     mate: 0.02,
     fight: 0.12,      // times strength
     light: 0.01,
+    wings: 0.015,     // per step, times wings * size (gravity worlds)
+    flap: 0.05,       // per airborne step, times lift * wings * size
+    jump: 0.3,        // per jump, times size
   },
   eatThreshold: 0.3,
   mateThreshold: 0.6,

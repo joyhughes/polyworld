@@ -4,6 +4,7 @@ import { P, WORLDS } from './params.js';
 import { makeRng } from './rng.js';
 import { GENE, N_OUT, decode, randomGenome, mutate, crossover } from './genome.js';
 import { Brain, OUT } from './brain.js';
+import { Plants } from './plants.js';
 
 const DEG = Math.PI / 180;
 const CELL = 5;
@@ -12,12 +13,15 @@ let nextId = 1;
 
 export class Agent {
   // y is the eye/body-centre height: fixed at eye level on the flat world.
-  constructor(genome, x, y, z, yaw, energy, rng, generation = 0, dims = 2) {
+  constructor(genome, x, y, z, yaw, energy, rng, generation = 0, dims = 2, gravity = false) {
     this.id = nextId++;
     this.genome = genome;
     const d = (this.traits = decode(genome));
     this.dims = dims;
-    this.brain = new Brain(genome, d, rng, dims);
+    this.gravity = gravity;
+    this.vy = 0;
+    this.jumps = 0;
+    this.brain = new Brain(genome, d, rng, dims, gravity);
     this.x = x;
     this.y = dims === 3 ? y : P.eyeHeight;
     this.z = z;
@@ -76,8 +80,27 @@ export class Agent {
     this.speed = o[OUT.speed] * t.maxSpeed;
     this.fov = (P.fovMin + (P.fovMax - P.fovMin) * o[OUT.focus]) * DEG;
 
-    let horiz = this.speed;
-    if (this.dims === 3) {
+    let horiz = this.speed, extra = 0;
+    if (this.gravity) {
+      // crawl on the ground, jump with a strong lift signal, and fly if wings
+      // give enough thrust to beat gravity
+      const lift = o[OUT.pitch], wings = t.wings, G = P.gravity;
+      const grounded = this.y <= this.r + 1e-3;
+      if (grounded) {
+        this.vy = 0;
+        if (lift > G.jumpThreshold) { this.vy = G.jump; extra += c.jump * this.size; this.jumps++; }
+      }
+      if (!grounded || this.vy > 0) {
+        this.vy = (this.vy - G.g + lift * wings * G.maxLift) * G.drag;
+        extra += c.flap * lift * wings * this.size;
+      }
+      this.y += this.vy;
+      if (this.y <= this.r) { this.y = this.r; this.vy = 0; }
+      if (this.y >= world.height - this.r) { this.y = world.height - this.r; this.vy = Math.min(0, this.vy); }
+      // look a little toward the direction of travel when airborne
+      this.pitch = Math.max(-0.5, Math.min(0.5, 0.5 * Math.atan2(this.vy, Math.max(0.05, this.speed))));
+      extra += c.wings * wings * this.size;
+    } else if (this.dims === 3) {
       // pitch is a turning rate like yaw, so a constant output loops through the
       // volume rather than pinning the agent against the floor or ceiling
       this.pitch += (o[OUT.pitch] - 0.5) * 2 * P.maxPitchRate;
@@ -105,7 +128,8 @@ export class Agent {
       + c.turn * Math.abs(turn)
       + c.eat * o[OUT.eat]
       + c.mate * o[OUT.mate]
-      + c.light * o[OUT.light];
+      + c.light * o[OUT.light]
+      + extra;
     if (o[OUT.fight] > P.fightThreshold) cost += c.fight * o[OUT.fight] * t.strength;
     this.energy -= cost;
     this.age++;
@@ -127,7 +151,7 @@ export class Agent {
 
 export class World {
   // dims: 2 for Polyworld's flat world, 3 for a volume agents swim through.
-  constructor(layout = 'patches', seed = (Math.random() * 2 ** 32) >>> 0, size = P.worldSize, dims = 2) {
+  constructor(layout = 'patches', seed = (Math.random() * 2 ** 32) >>> 0, size = P.worldSize, dims = 2, gravity = false) {
     this.seed = seed;
     this.rng = makeRng(seed);
     this.layoutKey = layout;
@@ -135,14 +159,17 @@ export class World {
     // Layouts are drawn on a 100x100 world; larger worlds scale coordinates
     // linearly and populations, food rates and caps by area.
     this.size = size;
+    this.gravity = gravity && dims === 3;
     this.dims = dims;
+    this.latitude = P.gravity.latitude;
     const k = size / 100, area = k * k;
-    this.height = dims === 3 ? P.volumeHeight * k : 0;
-    const foodScale = dims === 3 ? P.volumeFoodScale : 1;
-    const agentScale = dims === 3 ? P.volumeAgentScale : 1;
+    this.height = this.gravity ? P.gravity.height * k : dims === 3 ? P.volumeHeight * k : 0;
+    const volume = dims === 3 && !this.gravity;
+    const foodScale = volume ? P.volumeFoodScale : 1;
+    const agentScale = volume ? P.volumeAgentScale : 1;
     this.minAgents = Math.round(P.minAgents * area * agentScale);
     this.maxAgents = Math.round(P.maxAgents * area * agentScale);
-    this.maxFood = Math.round(P.food.maxTotal * area * foodScale);
+    this.maxFood = Math.round(P.food.maxTotal * area * (this.gravity ? P.plants.foodScale : foodScale));
     this.corpseEnergy = L.corpseEnergy ?? P.corpseEnergy;
     this.moveCost = P.cost.move * (L.moveCostScale ?? 1);
     this.patches = L.patches.map((p) => ({
@@ -165,8 +192,14 @@ export class World {
     this.agentCells = Array.from({ length: this.ncell * this.ncell }, () => []);
     this.foodCells = Array.from({ length: this.ncell * this.ncell }, () => []);
 
-    for (const p of this.patches) {
-      while (p.count < p.max / 2) this.spawnFood(p);
+    if (this.gravity) {
+      // food grows as evolving plants; the layout's patches are fertile ground
+      this.plants = new Plants(this);
+      this.plants.seedInitial();
+    } else {
+      for (const p of this.patches) {
+        while (p.count < p.max / 2) this.spawnFood(p);
+      }
     }
     for (let i = 0; i < Math.round(P.initAgents * area * agentScale); i++) this.agents.push(this.makeGAAgent(true));
   }
@@ -198,6 +231,7 @@ export class World {
 
   // Random height within the volume (eye level on the flat world).
   randomHeight(r) {
+    if (this.gravity) return r;
     return this.dims === 3 ? r + this.rng() * (this.height - 2 * r) : P.eyeHeight;
   }
 
@@ -211,7 +245,18 @@ export class World {
     patch.count++;
   }
 
+  // A seed lies on the ground as edible fruit, then tries to sprout.
+  addSeed(g, x, z, energy, generation) {
+    if (this.food.length >= this.maxFood) return;
+    const C = P.plants;
+    // fruit holds foodValue x the seed's energy for animals; a sprout gets the seed's energy
+    this.food.push({ x, y: 0.15, z, energy: energy * C.foodValue, seedEnergy: energy, patch: -2, g, generation,
+      germinate: this.t + C.germinateAfter * (0.5 + this.rng()), rot: this.t + C.seedLife });
+  }
+
   static foodHalf(f) {
+    // fruit is sized by the seed inside it, not its food value
+    if (f.patch === -2) return 0.1 + 0.02 * f.seedEnergy;
     return 0.25 + 0.45 * Math.sqrt(Math.min(1, f.energy / P.food.maxEnergy));
   }
 
@@ -234,7 +279,7 @@ export class World {
     const size = P.size[0] + (P.size[1] - P.size[0]) * genome[GENE.size];
     const [x, z] = this.randomFreeSpot(0.6 * size);
     const energy = P.maxEnergyPerSize * size * P.initEnergyFrac;
-    return new Agent(genome, x, this.randomHeight(0.6 * size), z, rng() * Math.PI * 2, energy, rng, gen, this.dims);
+    return new Agent(genome, x, this.randomHeight(0.6 * size), z, rng() * Math.PI * 2, energy, rng, gen, this.dims, this.gravity);
   }
 
   recordElite(a) {
@@ -261,7 +306,7 @@ export class World {
     a.offspring++;
     b.offspring++;
     const child = new Agent(genome, x, (a.y + b.y) / 2, z, rng() * Math.PI * 2, ea + eb, rng,
-      Math.max(a.generation, b.generation) + 1, this.dims);
+      Math.max(a.generation, b.generation) + 1, this.dims, this.gravity);
     child.parents = [a.id, b.id];
     births.push(child);
   }
@@ -276,6 +321,7 @@ export class World {
       return cz * n + cx;
     };
     for (const a of this.agents) this.agentCells[cellOf(a.x, a.z)].push(a);
+    if (this.plants) this.plants.buildGrid();
     for (const f of this.food) this.foodCells[cellOf(f.x, f.z)].push(f);
   }
 
@@ -284,6 +330,13 @@ export class World {
     for (const a of this.agents) {
       const cx = Math.floor(a.x * inv), cz = Math.floor(a.z * inv);
       const eat = a.out[OUT.eat], fight = a.out[OUT.fight], mate = a.out[OUT.mate];
+      if (this.plants && eat > P.eatThreshold) {
+        // plants share the 5-unit grid
+        const amt = this.plants.graze(a, P.eatRate * eat, cx - 1, cx + 1, cz - 1, cz + 1);
+        a.energy += amt;
+        a.eaten += amt;
+        this.stats.plant += amt;
+      }
       for (let j = cz - 1; j <= cz + 1; j++) {
         if (j < 0 || j >= n) continue;
         for (let i = cx - 1; i <= cx + 1; i++) {
@@ -301,7 +354,7 @@ export class World {
               f.energy -= amt;
               a.energy += amt;
               a.eaten += amt;
-              if (f.patch < 0) this.stats.meat += amt; else this.stats.plant += amt;
+              if (f.patch === -1) this.stats.meat += amt; else this.stats.plant += amt;
             }
           }
 
@@ -363,13 +416,22 @@ export class World {
       this.interval.deaths++;
       this.recordElite(a);
       if (this.food.length < this.maxFood) {
-        this.food.push({ x: a.x, y: a.y, z: a.z, energy: this.corpseEnergy * a.size, patch: -1 });
+        this.food.push({ x: a.x, y: this.gravity ? 0.3 : a.y, z: a.z, energy: this.corpseEnergy * a.size, patch: -1 });
       }
     }
     for (const c of births) alive.push(c);
     this.stats.born += births.length;
     this.interval.born += births.length;
     this.agents = alive;
+
+    // seeds sprout into plants, or rot
+    if (this.plants) {
+      for (const f of this.food) {
+        if (f.patch !== -2 || f.energy <= 0.5) continue;
+        if (this.t >= f.germinate && this.plants.add(f.g, f.x, f.z, f.seedEnergy, f.generation)) f.energy = 0;
+        else if (this.t >= f.rot) f.energy = 0;
+      }
+    }
 
     // eaten food
     let w = 0;
@@ -379,8 +441,10 @@ export class World {
     }
     this.food.length = w;
 
+    if (this.plants && this.t % P.plants.updateEvery === 0) this.plants.update(P.plants.updateEvery);
+
     // food growth
-    for (const p of this.patches) {
+    for (const p of this.gravity ? [] : this.patches) {
       p.acc += p.rate;
       while (p.acc >= 1) {
         p.acc -= 1;
@@ -397,6 +461,15 @@ export class World {
 
     this.t++;
     if (this.t % this.historyEvery === 0) this.sample();
+  }
+
+  plantStats() {
+    const L = this.plants.list, A = this.agents;
+    let h = 0, hmax = 0, bark = 0, wings = 0, air = 0;
+    for (const p of L) { h += p.h; hmax = Math.max(hmax, p.h); bark += p.bark; }
+    for (const a of A) { wings += a.traits.wings; if (a.y > a.r + 0.3) air++; }
+    const np = L.length || 1, na = A.length || 1;
+    return { plants: L.length, treeH: h / np, treeMax: hmax, bark: bark / np, wings: wings / na, airborne: air / na };
   }
 
   sample() {
@@ -420,6 +493,7 @@ export class World {
       synapses: syn / n,
       generation: gen / n,
       fitness: fit / n,
+      ...(this.plants ? this.plantStats() : {}),
     });
     this.interval = { born: 0, ga: 0, deaths: 0 };
     if (this.history.length > 800) {

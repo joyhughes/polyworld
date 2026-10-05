@@ -7,16 +7,19 @@
 // magnitude changes by w += lr * (post - 0.5) * (pre - 0.5).
 
 import { P } from './params.js';
-import { GENE, MAX_INTERNAL, N_IN, N_OUT, N_SRC, N_TGT } from './genome.js';
+import { GENE, MAX_INTERNAL, N_IN, N_OUT, N_SRC, N_TGT, OUTPUT_NAMES } from './genome.js';
 
 export const OUT = { eat: 0, mate: 1, fight: 2, speed: 3, yaw: 4, light: 5, focus: 6, pitch: 7 };
 
 export class Brain {
-  constructor(g, traits, rng, dims = 2) {
+  constructor(g, traits, rng, dims = 2, gravity = false) {
     // vision groups are visCols[c] x visRows neurons (a single row on the flat world)
     this.visRows = dims === 3 ? traits.visionRows : 1;
     this.visCols = [traits.nRed, traits.nGreen, traits.nBlue];
     this.numOutputs = dims === 3 ? N_OUT : N_OUT - 1;
+    // under gravity the last output is lift (jump / flap) rather than pitch
+    this.outputNames = OUTPUT_NAMES.slice(0, this.numOutputs);
+    if (gravity) this.outputNames[N_OUT - 1] = 'lift';
     const sizes = new Array(N_SRC).fill(0);
     sizes[0] = 1;
     sizes[1] = 1;

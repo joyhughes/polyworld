@@ -74,6 +74,51 @@ packed into columns past the GPU's texture-height limit. Flat-world vision is
 pixel-identical to before; 3D vision matches an independent per-agent render on
 99.7% of pixels.
 
+**3D with gravity** adds land, sky, evolving plants and a sun:
+
+- **Agents crawl.** The eighth output becomes *lift*. On the ground, a strong
+  lift signal is a jump. A *wings* gene, decoded cubed so it starts rare, turns
+  lift into flapping thrust; with enough wing, an agent can beat gravity and
+  fly. Wings cost energy every step, flapping more, and each jump has a cost.
+- **Plants evolve.** Each plant has its own genome:
+  - how it splits surplus energy between height, leaves, seeds and a winter
+    reserve;
+  - bark;
+  - seed size;
+  - seed dispersal.
+
+  Plants photosynthesise in proportion to sunlit canopy area. Taller neighbours
+  shade them, and shadows fall away from the sun, getting longer as it gets
+  lower. When energy runs short, leaves die back first (deciduous behaviour
+  emerges from that). A plant dies when its reserve runs out or it reaches its
+  lifespan. Bark acts as woodiness: it costs extra to build height, makes the
+  stem inedible, and lengthens life (soft herbs live about 0.4× as long, fully
+  woody plants about 2.8×).
+- **Grazing and fruit.** Agents eat leaves they can reach. Crawlers reach only
+  low canopies; jumpers and fliers reach higher. Unprotected stems are edible
+  too. Seeds fall to the ground as fruit and sprout after a delay unless
+  eaten, so energy from tall canopies reaches the ground. Corpses become
+  carrion. Each unit of plant matter is worth 5 energy to an animal.
+- **Latitude** is a live slider. It sets the sun's path over a 6,000-step year:
+  daily mean insolation (the standard formula, so polar night and midnight sun
+  appear), noon sun elevation (shadow length), and the season shown in the HUD.
+  The main view is lit from the sun, with the sky brightening and darkening
+  through the year.
+
+What happened in 60k-step runs on the patches layout (results vary from run to
+run):
+
+| | Equator (0°) | 45°N | 70°N |
+|---|---|---|---|
+| Agents | self-sustaining from about 15k steps; 70–116 agents; generation about 190 | near the self-sustaining threshold; often seasonal booms (about 200) and crashes (about 45) | never self-sustaining; polar night cuts off food every year |
+| Plants | seeds got smaller (5.9 → 3.7) | seeds got smaller | seeds got bigger (7.5 → 9.1) |
+| Bark | about 0.3 → 0.47 | about 0.3 → 0.47 | about 0.3 → 0.47 |
+| Jumping | agents mostly stopped (1–11% airborne) | | |
+
+Flight has not yet evolved at any latitude; wings tend to drift down, because
+crawling and eating fruit pays better. Under grazing the forest thins toward
+shrubland (mean height about 2 → 1), though tall trees persist.
+
 **Indolent cannibals** is a layout that recreates the most famous accident in
 Polyworld's history. In an early run, a dead agent became more food energy than
 its parents had spent making it. Agents evolved to sit still, mate, and eat
@@ -113,8 +158,9 @@ isolate its connections. *Activity* is a raster of every neuron over the last
 400 steps. *Matrix* is the full weight matrix. The inspector shows the
 agent's retina, vision neurons, outputs and its full synapse weight matrix.
 
-`node tools/smoke.mjs [layout] [steps]` runs the simulation headless, with noise
-in place of vision, to check that the code runs and how fast.
+`node tools/smoke.mjs [layout] [steps] [flat|volume|gravity] [latitude]` runs
+the simulation headless, with noise in place of vision, to check that the code
+runs and how fast. It is also enough to study plant dynamics.
 
 `window.pw` exposes `world` and `run(n)` in the console for experiments.
 
@@ -125,6 +171,7 @@ src/params.js   parameters and world layouts
 src/genome.js   genome layout, decoding, mutation, crossover
 src/brain.js    brain growth from genes, update and Hebbian learning
 src/brainview.js  brain viewer: network diagram, activity raster, weight matrix
+src/plants.js   evolving plants, shading, grazing, and the sun by latitude and season
 src/world.js    agents, food, barriers, interactions, GA, statistics
 src/gl.js       instanced-box renderer, per-agent vision pass, picking
 src/main.js     UI, camera, charts, inspector

@@ -33,6 +33,7 @@ gene('redN');
 gene('greenN');
 gene('blueN');
 gene('visionRows'); // 3D only: retina rows each colour channel is split into
+gene('wings');      // gravity only: flight muscle; decoded cubed so it starts rare
 gene('numInternal');
 gene('exc', MAX_INTERNAL);
 gene('inh', MAX_INTERNAL);
@@ -67,6 +68,7 @@ export function decode(g) {
     nGreen: irange(1, MAX_VISION, g[G.greenN]),
     nBlue: irange(1, MAX_VISION, g[G.blueN]),
     visionRows: irange(1, 4, g[G.visionRows]),
+    wings: g[G.wings] ** 3,
     numInternal: irange(1, MAX_INTERNAL, g[G.numInternal]),
     exc,
     inh,

@@ -11,10 +11,10 @@ const EXC = [232, 106, 90];   // excitatory synapse colour
 const INH = [90, 141, 232];   // inhibitory synapse colour
 const GROUP_TINT = { 2: [255, 80, 70], 3: [80, 230, 90], 4: [90, 130, 255] };
 
-function groupName(g) {
+function groupName(g, b) {
   if (g < N_IN) return INPUT_NAMES[g];
   if (g < N_IN + MAX_INTERNAL) return `group ${g - N_IN + 1}`;
-  return OUTPUT_NAMES[g - N_IN - MAX_INTERNAL];
+  return (b ? b.outputNames : OUTPUT_NAMES)[g - N_IN - MAX_INTERNAL];
 }
 
 function groupOf(b, n) {
@@ -189,7 +189,7 @@ export class BrainView {
     const sp = Math.min(18, (bottom - top) / slots);
     let cy = top + ((bottom - top) - sp * slots) / 2;
     for (const g of inGroups) {
-      labels.push({ text: groupName(g), x: padL - 12, y: cy + sp * (b.sizes[g] - 1) / 2, align: 'right' });
+      labels.push({ text: groupName(g, b), x: padL - 12, y: cy + sp * (b.sizes[g] - 1) / 2, align: 'right' });
       for (let k = 0; k < b.sizes[g]; k++) { x[b.starts[g] + k] = padL; y[b.starts[g] + k] = cy; cy += sp; }
       cy += sp * 1.2;
     }
@@ -210,7 +210,7 @@ export class BrainView {
         shape[id] = b.sign[id] < 0 ? 1 : 0;
       }
       const ne = b.sign.subarray(b.starts[g], b.starts[g] + m).filter((s) => s > 0).length;
-      labels.push({ text: groupName(g), x: gx, y: top - 22, align: 'center' });
+      labels.push({ text: groupName(g, b), x: gx, y: top - 22, align: 'center' });
       labels.push({ text: `${ne}E ${m - ne}I`, x: gx, y: top - 10, align: 'center' });
     });
 
@@ -306,7 +306,7 @@ export class BrainView {
     ctx.textAlign = 'left';
     const thr = { eat: P.eatThreshold, mate: P.mateThreshold, fight: P.fightThreshold };
     for (let o = 0; o < b.numOutputs; o++) {
-      const i = b.outStart + o, v = st[i], name = OUTPUT_NAMES[o];
+      const i = b.outStart + o, v = st[i], name = b.outputNames[o];
       const bx = x[i] + ro + 8, bw = 60;
       ctx.fillStyle = '#d8dbe2';
       ctx.fillText(name, bx, y[i] - 3);
@@ -348,7 +348,7 @@ export class BrainView {
       if (b.from[s] === i) fanOut++;
     }
     const lines = [
-      `${groupName(g)} [${i - b.starts[g]}]${b.sign[i] < 0 ? ' inhibitory' : g >= N_IN && g < N_IN + MAX_INTERNAL ? ' excitatory' : ''}`,
+      `${groupName(g, b)} [${i - b.starts[g]}]${b.sign[i] < 0 ? ' inhibitory' : g >= N_IN && g < N_IN + MAX_INTERNAL ? ' excitatory' : ''}`,
       `activation ${b.state[i].toFixed(3)}`,
       i >= b.firstNonInput ? `bias ${b.bias[i].toFixed(2)}` : 'input neuron',
       `synapses in ${fanIn} · out ${fanOut}`,
@@ -406,7 +406,7 @@ export class BrainView {
       if (!m) continue;
       const y0 = top + b.starts[g] * rowH;
       ctx.beginPath(); ctx.moveTo(gut, y0 + 0.5); ctx.lineTo(W - 8, y0 + 0.5); ctx.stroke();
-      if (m * rowH >= 9 || g >= N_IN + MAX_INTERNAL) ctx.fillText(groupName(g), gut - 6, y0 + (m * rowH) / 2 + 3);
+      if (m * rowH >= 9 || g >= N_IN + MAX_INTERNAL) ctx.fillText(groupName(g, b), gut - 6, y0 + (m * rowH) / 2 + 3);
     }
     ctx.textAlign = 'left';
     ctx.fillStyle = '#5c6270';

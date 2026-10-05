@@ -3,6 +3,7 @@ import { World } from './world.js';
 import { Renderer } from './gl.js';
 import { BrainView, drawMatrix } from './brainview.js';
 import { OUTPUT_NAMES } from './genome.js';
+import { sun } from './plants.js';
 
 const $ = (id) => document.getElementById(id);
 
@@ -20,7 +21,11 @@ function newWorld() {
     localStorage.setItem('pw.size', $('worldSize').value);
     localStorage.setItem('pw.dims', $('dims').value);
   } catch {}
-  world = new World($('layout').value, undefined, +$('worldSize').value, +$('dims').value);
+  const mode = $('dims').value;
+  world = new World($('layout').value, undefined, +$('worldSize').value, mode === '2' ? 2 : 3, mode === 'g');
+  world.latitude = +$('lat').value;
+  $('latRow').hidden = !world.gravity;
+  document.querySelectorAll('.grav').forEach((el) => { el.hidden = !world.gravity; });
   selectedId = null;
   setCam('orbit');
   cam.target = [world.size / 2, world.height / 3, world.size / 2];
@@ -52,6 +57,16 @@ $('reset').onclick = newWorld;
 $('layout').onchange = newWorld;
 $('worldSize').onchange = newWorld;
 $('dims').onchange = newWorld;
+const latLabel = () => {
+  const v = +$('lat').value;
+  $('latVal').textContent = `${Math.abs(v)}°${v > 0 ? 'N' : v < 0 ? 'S' : ''}`;
+};
+$('lat').oninput = () => {
+  if (world) world.latitude = +$('lat').value;
+  latLabel();
+  try { localStorage.setItem('pw.lat', $('lat').value); } catch {}
+};
+latLabel();
 const setPaused = (p) => { paused = p; $('pause').textContent = p ? 'Run' : 'Pause'; };
 $('pause').onclick = () => setPaused(!paused);
 $('step').onclick = () => { setPaused(true); stepOnce(); };
@@ -211,6 +226,10 @@ function drawCharts() {
     { color: '#5a8de8', values: h.map((s) => s.neurons) },
     { color: '#c58ae8', values: h.map((s) => s.synapses / 20) },
     { color: '#e86a5a', values: h.map((s) => s.generation) },
+    ...(world.plants ? [
+      { color: '#c9a36a', values: h.map((s) => (s.treeH || 0) * 5) },
+      { color: '#e8e05a', values: h.map((s) => (s.wings || 0) * 100) },
+    ] : []),
   ], n);
 }
 
@@ -227,6 +246,20 @@ function drawStats() {
     ['speed avg', (A.reduce((t, a) => t + a.speed, 0) / (A.length || 1)).toFixed(3)],
     ['best fit', world.elites.length ? world.elites[0].fitness.toFixed(2) : '–'],
   ];
+  if (world.plants) {
+    const L = world.plants.list;
+    let h = 0, hmax = 0, bark = 0, wings = 0, air = 0, fly = 0;
+    for (const p of L) { h += p.h; hmax = Math.max(hmax, p.h); bark += p.bark; }
+    for (const a of A) {
+      wings += a.traits.wings;
+      if (a.y > a.r + 0.3) air++;
+      if (a.traits.wings * P.gravity.maxLift > P.gravity.g) fly++;
+    }
+    const np = L.length || 1, na = A.length || 1;
+    items.push(['plants', L.length], ['tree h avg', (h / np).toFixed(2)], ['tree h max', hmax.toFixed(1)],
+      ['bark avg', (bark / np).toFixed(2)], ['wings avg', (wings / na).toFixed(3)], ['can fly', fly],
+      ['off ground', Math.round((100 * air) / na) + '%'], ['plant eaten', s.meat + s.plant ? Math.round(100 * s.plant / (s.meat + s.plant)) + '%' : '–']);
+  }
   $('stats').innerHTML = items.map(([k, v]) => `<div><span>${k}</span> ${v}</div>`).join('');
 }
 
@@ -311,6 +344,7 @@ function drawAgent() {
   outputBars.forEach((ob, o) => {
     const on = o < b.numOutputs;
     ob.label.hidden = ob.bar.hidden = !on;
+    if (on) ob.label.textContent = b.outputNames[o];
     if (on) ob.fill.style.width = a.out[o] * 100 + '%';
   });
 
@@ -342,7 +376,11 @@ function loop() {
   }
   renderer.renderMain(world, cam, selected());
   const s = selected();
-  $('hud').innerHTML = `<b>Polyworld</b> · ${world.size}² · step ${world.t} · ${world.agents.length} agents · ${world.food.length} food`
+  const sunInfo = world.gravity ? (() => {
+    const S = sun(world.latitude, world.t);
+    return ` · ${S.season} · sun ${Math.max(0, S.elev * 180 / Math.PI).toFixed(0)}° · light ${S.light.toFixed(2)}`;
+  })() : '';
+  $('hud').innerHTML = `<b>Polyworld</b> · ${world.size}² · step ${world.t}${sunInfo} · ${world.agents.length} agents · ${world.food.length} food`
     + (s ? ` · following #${s.id}` : '') + (paused ? ' · <b>paused</b>' : '');
   if (frame % 6 === 0) { drawStats(); drawCharts(); }
   if (frame % 2 === 0) { drawWall(); drawAgent(); }
@@ -356,7 +394,9 @@ try {
   if (l && WORLDS[l]) $('layout').value = l;
   if (sz && [...$('worldSize').options].some((o) => o.value === sz)) $('worldSize').value = sz;
   const dm = localStorage.getItem('pw.dims');
-  if (dm === '2' || dm === '3') $('dims').value = dm;
+  if (dm === '2' || dm === '3' || dm === 'g') $('dims').value = dm;
+  const lt = localStorage.getItem('pw.lat');
+  if (lt !== null && !isNaN(+lt)) $('lat').value = lt;
 } catch {}
 newWorld();
 requestAnimationFrame(loop);
